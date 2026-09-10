@@ -1,0 +1,29 @@
+# Secrets and Environment Variables
+.env
+*.env
+.env.*
+!.env.example
+
+# Runtime State & Cache
+data/
+processed_comments.txt
+unlocked_threads.txt
+test_review.txt
+
+# Log Files
+*.log
+logs/
+
+# Temporary Files
+/tmp/
+*.tmp
+*.bak
+
+# System & Editor Files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

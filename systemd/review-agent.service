@@ -1,0 +1,33 @@
+[Unit]
+Description=GitHub Review & Assistant Agent (Antigravity CLI)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User, Group, and WorkingDirectory to match your deployment environment:
+User=%u
+WorkingDirectory=%h/github-review-agent
+ExecStart=/usr/bin/env bash %h/github-review-agent/review-agent.sh
+
+# Environment file containing credentials and bot configuration
+# Permissions MUST be 0600 (chmod 600 .env)
+EnvironmentFile=%h/github-review-agent/.env
+
+# Restart configuration
+Restart=always
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/github-review-agent %h/processed_comments.txt %h/unlocked_threads.txt %h/review.log
+
+# Standard output and logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
