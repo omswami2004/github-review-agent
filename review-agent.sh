@@ -64,6 +64,9 @@ POLL_INTERVAL="${POLL_INTERVAL:-15}"
 # Execution tuning
 AGY_TIMEOUT="${AGY_TIMEOUT:-15m0s}"
 AGY_FLAGS="${AGY_FLAGS:---dangerously-skip-permissions}"
+# Models tried in order (see `agy models`); the next one is used if a model fails,
+# e.g. because its quota is exhausted.
+AGY_MODELS="${AGY_MODELS:-claude-sonnet-4-6 gemini-3.8-flash-high gemini-3.1-pro-high}"
 
 # Monitored repositories list
 if [ -n "${WATCH_REPOS:-}" ]; then
@@ -75,8 +78,9 @@ else
 fi
 
 # Response footer
-DEFAULT_FOOTER=$'\n\n---\n*Msgs from AI review agent powered by Antigravity CLI*'
-BOT_FOOTER="${BOT_FOOTER:-$DEFAULT_FOOTER}"
+# BOT_FOOTER is optional extra text; the "Reviewed by" line is always appended after it.
+BOT_FOOTER="${BOT_FOOTER:-}"
+OWNER_NAME="${OWNER_NAME:-$ADMIN_USER}"
 
 touch "$PROCESSED_FILE"
 touch "$UNLOCKED_THREADS_FILE"
@@ -208,6 +212,12 @@ process_comment() {
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "repos/$repo/$comment_api_path/$comment_id/reactions" \
       -f content='eyes' >/dev/null 2>&1 &
+  elif [[ "$comment_id" =~ ^subj_ ]]; then
+    gh api --method POST \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "repos/$repo/issues/$item_num/reactions" \
+      -f content='eyes' >/dev/null 2>&1 &
   fi
 
   # 6. Check if this is a PR or Issue, and fetch diff if available
@@ -215,9 +225,9 @@ process_comment() {
   local item_type="Issue"
   local diff_file="/tmp/item_${item_num}_diff.txt"
   if gh pr diff "$item_num" -R "$repo" > "$diff_file" 2>/dev/null && [ -s "$diff_file" ]; then
-    truncated_diff=$(head -c 60000 "$diff_file")
+    truncated_diff=$(head -c 200000 "$diff_file")
     item_type="Pull Request"
-  elif gh pr view "$item_num" -R "$repo" >/dev/null 2>&1; then
+  elif gh pr view "$item_num" -R "$repo" --json number >/dev/null 2>&1; then
     item_type="Pull Request"
   fi
   rm -f "$diff_file"
@@ -237,10 +247,58 @@ $truncated_diff}
 User Message / Instruction (from @$comment_user):
 $prompt_body
 
-Instructions:
-Directly fulfill the user's request above.
-- If the user asks for a review, perform a code review.
-- If the user asks you to create a PR, write code, answer questions, explain logic, or take an action, execute or answer exactly what they asked.
+Critical Execution Constraints:
+1. OUTPUT ONLY THE RESPONSE TEXT: Output strictly your final Markdown response. Do NOT include conversational meta-monologue, scratchpad chatter, or planning statements (e.g. NEVER output "Let me analyze the diff...", "Now let me compose...", "Good — no reviews yet...", "The review has been posted...", or "Here's a summary:").
+2. DO NOT POST VIA TOOLS: NEVER execute 'gh pr review', 'gh pr comment', 'gh issue comment', or curl commands to post comments or reviews yourself. The parent runner script automatically takes your response text and posts it to GitHub.
+3. CODE REVIEW FORMAT: If the user asks for a review (or review feedback), follow this strict format without any text preceding "## 📋 Code Review":
+
+## 📋 Code Review
+
+| Metric | Assessment |
+| :--- | :--- |
+| **Verdict** | ✅ Approved / ⚠️ Changes Requested / 💬 Comment Only |
+| **Risk Level** | 🟢 Low / 🟡 Medium / 🔴 High |
+| **Scope** | [1-sentence summary of affected components] |
+
+### 🔍 Executive Overview
+[2-3 concise sentences summarizing the purpose, architecture, and overall quality of the changes.]
+
+---
+
+### 🔴 Blocking Issues (Must Fix Before Merge)
+*Critical bugs, security vulnerabilities, runtime crashes, breaking API changes, or broken tests.*
+
+- **\`[filename]\` (line [range]) — [Issue Title]**:
+  - **Problem**: Clear description of what fails and when.
+  - **Impact**: Security, stability, or correctness consequence.
+  - **Suggested Fix**:
+    \`\`\`[language]
+    // Concrete code replacement
+    \`\`\`
+*(If none, explicitly write: "✅ None identified.")*
+
+---
+
+### 🟡 Non-Blocking Suggestions (Nice to Have)
+*Performance optimizations, edge cases, naming, ergonomics, and documentation.*
+
+- **\`[filename]\` (line [range]) — [Suggestion Title]**:
+  - **Observation**: What could be improved.
+  - **Recommendation**: Alternative approach or refinement.
+*(If none, explicitly write: "None identified.")*
+
+---
+
+### 🟢 Positive Highlights
+*Architectural decisions, safety rails, clean patterns, or comprehensive test coverage.*
+
+- **[Highlight 1]**: Why this was well done.
+- **[Highlight 2]**: Why this was well done.
+
+---
+
+Instructions for Non-Review Requests:
+- If the user asks you to create a PR, write code, answer questions, explain logic, or take an action, execute or answer exactly what they asked clearly and directly without conversational preambles.
 
 Identity & Git Commit Policy:
 - You are strictly $BOT_USER (email: $GIT_AUTHOR_EMAIL).
@@ -250,41 +308,62 @@ Identity & Git Commit Policy:
 PROMPT_EOF
   )
 
-  log "-------------------- [AGY EXECUTION START] --------------------"
-  local temp_output
-  temp_output=$(mktemp /tmp/agy_reply.XXXXXX)
+  # Try each model in AGY_MODELS until one produces a reply
+  local ai_reply="" agy_exit=1 model temp_output
+  for model in $AGY_MODELS; do
+    log "-------------------- [AGY EXECUTION START (model: $model)] --------------------"
+    temp_output=$(mktemp /tmp/agy_reply.XXXXXX)
 
-  # Stream live to terminal, log file, and capture into temp_output
-  agy $AGY_FLAGS --print-timeout "$AGY_TIMEOUT" -p "$full_prompt" 2>&1 | tee "$temp_output" | tee -a "$LOG_FILE"
-  local agy_exit=${PIPESTATUS[0]}
+    # Stream live to terminal, log file, and capture into temp_output
+    agy $AGY_FLAGS --model "$model" --print-timeout "$AGY_TIMEOUT" -p "$full_prompt" 2>&1 | tee "$temp_output" | tee -a "$LOG_FILE"
+    agy_exit=${PIPESTATUS[0]}
 
-  log "-------------------- [AGY EXECUTION END (exit: $agy_exit)] --------------------"
+    log "-------------------- [AGY EXECUTION END (model: $model, exit: $agy_exit)] --------------------"
 
-  local ai_reply
-  ai_reply=$(cat "$temp_output")
-  rm -f "$temp_output"
+    ai_reply=$(cat "$temp_output")
+    rm -f "$temp_output"
+
+    if [ $agy_exit -eq 0 ] && [ -n "$ai_reply" ]; then
+      # A short reply that reads like a quota error is a failure, not a review
+      if [ ${#ai_reply} -lt 600 ] && echo "$ai_reply" | grep -qiE 'quota|rate.?limit|resource.?exhausted|usage limit|credit|429'; then
+        log "Model $model looks quota-limited; trying next model"
+        ai_reply=""
+        agy_exit=1
+        continue
+      fi
+      log "Reply generated by model: $model"
+      break
+    fi
+
+    log "Model $model failed (exit: $agy_exit); trying next model"
+    ai_reply=""
+  done
 
   if [ $agy_exit -ne 0 ] || [ -z "$ai_reply" ]; then
-    log "ERROR: agy returned empty response or failed with exit code $agy_exit"
+    log "ERROR: all models in AGY_MODELS failed or returned an empty response (last exit code $agy_exit)"
     echo "$comment_id" >> "$PROCESSED_FILE"
     return
   fi
 
   # 8. Post response to PR or Issue
-  local full_response="${ai_reply}${BOT_FOOTER}"
+  local full_response="${ai_reply}${BOT_FOOTER}"$'\n\n---\n'"*Reviewed by ${model} on behalf of [${OWNER_NAME}](https://github.com/${ADMIN_USER})*"
   log "Posting response comment to $repo $item_type #$item_num..."
   local post_result
   local post_exit=1
+  local resp_file
+  resp_file=$(mktemp /tmp/bot_resp.XXXXXX)
+  printf "%s\n" "$full_response" > "$resp_file"
 
   if [ "$item_type" = "Pull Request" ]; then
-    post_result=$(gh pr comment "$item_num" -R "$repo" --body "$full_response" 2>&1)
+    post_result=$(gh pr comment "$item_num" -R "$repo" -F "$resp_file" 2>&1)
     post_exit=$?
   fi
 
   if [ $post_exit -ne 0 ]; then
-    post_result=$(gh issue comment "$item_num" -R "$repo" --body "$full_response" 2>&1)
+    post_result=$(gh issue comment "$item_num" -R "$repo" -F "$resp_file" 2>&1)
     post_exit=$?
   fi
+  rm -f "$resp_file"
 
   if [ $post_exit -eq 0 ]; then
     log "Successfully posted response to $repo $item_type #$item_num: $post_result"
@@ -301,54 +380,127 @@ poll_notifications() {
   local notifications
   notifications=$(gh api notifications -q '
     .[] | select((.reason=="mention" or .reason=="author" or .reason=="comment") and (.subject.type=="PullRequest" or .subject.type=="Issue"))
-    | "\(.id) \(.repository.full_name) \(.subject.type) \(.subject.url) \(.subject.latest_comment_url // "")"
-  ' 2>/dev/null)
+    | "\(.id) \(.repository.full_name) \(.subject.type) \(.subject.url) \(.subject.latest_comment_url // "none") \(.reason) \(.updated_at)"
+  ' 2>&1)
+  local notif_exit=$?
 
-  while read -r notif_id repo subj_type subj_url comment_url; do
+  if [ $notif_exit -ne 0 ]; then
+    if [ "${NOTIF_WARN_LOGGED:-false}" != "true" ]; then
+      log "[INFO] GitHub notifications API unavailable (exit: $notif_exit). Polling via WATCH_REPOS."
+      NOTIF_WARN_LOGGED=true
+    fi
+    return
+  fi
+
+  while read -r notif_id repo subj_type subj_url comment_url notif_reason updated_at; do
     [ -z "$notif_id" ] && continue
 
     local item_num
     item_num=$(basename "$subj_url")
+    local thread_handled=false
 
-    local comment_id=""
-    local comment_user=""
-    local comment_user_type="User"
-    local comment_body=""
-    local comment_api_path="issues/comments"
-
-    if [ -n "$comment_url" ] && [ "$comment_url" != "null" ]; then
-      if [[ "$comment_url" =~ /pulls/comments/([0-9]+) ]]; then
+    # Case 1: comment_url is an actual comment endpoint (contains /comments/<id>)
+    if [ -n "$comment_url" ] && [ "$comment_url" != "none" ] && [[ "$comment_url" =~ /comments/([0-9]+) ]]; then
+      local comment_api_path="issues/comments"
+      if [[ "$comment_url" =~ /pulls/comments/ ]]; then
         comment_api_path="pulls/comments"
       fi
 
       local comment_json
       comment_json=$(gh api "$comment_url" 2>/dev/null)
       if [ -n "$comment_json" ]; then
+        local comment_id comment_user comment_user_type comment_body
         comment_id=$(echo "$comment_json" | jq -r '.id // empty')
         comment_user=$(echo "$comment_json" | jq -r '.user.login // empty')
         comment_user_type=$(echo "$comment_json" | jq -r '.user.type // "User"')
         comment_body=$(echo "$comment_json" | jq -r '.body // empty')
+
+        if [ -n "$comment_id" ]; then
+          process_comment "$repo" "$item_num" "$comment_id" "$comment_user" "$comment_user_type" "$comment_body" "$comment_api_path"
+          thread_handled=true
+        fi
       fi
     fi
 
-    # If comment_url was missing or pointed to the subject itself
-    if [ -z "$comment_id" ]; then
+    # Case 2: comment_url was missing, "none", or pointed to the PR/issue itself (/pulls/123 or /issues/123).
+    # Actively inspect recent comments on this issue/PR for mentions of the bot.
+    if [ "$thread_handled" = "false" ]; then
+      local recent_comments
+      recent_comments=$(gh api "repos/$repo/issues/comments?sort=created&direction=desc&per_page=15" 2>/dev/null)
+      # Check issue-level comments for this issue/PR
+      local matched_comments
+      matched_comments=$(gh api "repos/$repo/issues/$item_num/comments?sort=created&direction=desc&per_page=10" \
+        -q '.[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
+
+      while read -r c_id c_user c_utype; do
+        [ -z "$c_id" ] && continue
+        if ! grep -qx "$c_id" "$PROCESSED_FILE"; then
+          local c_body
+          c_body=$(gh api "repos/$repo/issues/comments/$c_id" -q '.body' 2>/dev/null)
+          process_comment "$repo" "$item_num" "$c_id" "$c_user" "$c_utype" "$c_body" "issues/comments"
+        fi
+        thread_handled=true
+      done <<< "$matched_comments"
+
+      # Also inspect recent PR review comments if this is a Pull Request
+      if [ "$subj_type" = "PullRequest" ]; then
+        local matched_pull_comments
+        matched_pull_comments=$(gh api "repos/$repo/pulls/$item_num/comments?sort=created&direction=desc&per_page=10" \
+          -q '.[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
+
+        while read -r c_id c_user c_utype; do
+          [ -z "$c_id" ] && continue
+          if ! grep -qx "$c_id" "$PROCESSED_FILE"; then
+            local c_body
+            c_body=$(gh api "repos/$repo/pulls/comments/$c_id" -q '.body' 2>/dev/null)
+            process_comment "$repo" "$item_num" "$c_id" "$c_user" "$c_utype" "$c_body" "pulls/comments"
+          fi
+          thread_handled=true
+        done <<< "$matched_pull_comments"
+      fi
+    fi
+
+    # Case 3: Check if the mention was in the opening Issue / PR description itself
+    if [ "$thread_handled" = "false" ]; then
       local subj_json
       subj_json=$(gh api "$subj_url" 2>/dev/null)
       if [ -n "$subj_json" ]; then
-        comment_id="subj_$(echo "$subj_json" | jq -r '.id // empty')"
-        comment_user=$(echo "$subj_json" | jq -r '.user.login // empty')
-        comment_user_type=$(echo "$subj_json" | jq -r '.user.type // "User"')
-        comment_body=$(echo "$subj_json" | jq -r '.body // empty')
+        local s_id s_user s_utype s_body
+        s_id="subj_$(echo "$subj_json" | jq -r '.id // empty')"
+        s_user=$(echo "$subj_json" | jq -r '.user.login // empty')
+        s_utype=$(echo "$subj_json" | jq -r '.user.type // "User"')
+        s_body=$(echo "$subj_json" | jq -r '.body // empty')
+
+        if echo "$s_body" | grep -qi "@$BOT_USER"; then
+          if ! grep -qx "$s_id" "$PROCESSED_FILE"; then
+            process_comment "$repo" "$item_num" "$s_id" "$s_user" "$s_utype" "$s_body" "issues/comments"
+          fi
+          thread_handled=true
+        fi
       fi
     fi
 
-    if [ -n "$comment_id" ]; then
-      process_comment "$repo" "$item_num" "$comment_id" "$comment_user" "$comment_user_type" "$comment_body" "$comment_api_path"
+    # Acknowledgment:
+    # If handled, mark as read. If not handled and reason was "mention", check age:
+    # if older than 3 minutes (e.g. comment was deleted/edited away), mark as read so we don't loop forever.
+    # Otherwise keep unread so the next polling cycle can retry.
+    if [ "$thread_handled" = "true" ] || [ "$notif_reason" != "mention" ]; then
+      gh api --method PATCH "notifications/threads/$notif_id" >/dev/null 2>&1
+    else
+      local notif_age=0
+      if [ -n "$updated_at" ]; then
+        local updated_epoch now_epoch
+        updated_epoch=$(date -d "$updated_at" +%s 2>/dev/null || echo 0)
+        now_epoch=$(date +%s)
+        notif_age=$(( now_epoch - updated_epoch ))
+      fi
+      if [ "$notif_age" -gt 180 ]; then
+        log "Notice: Notification $notif_id ($repo #$item_num) has no indexed mention after ${notif_age}s; marking read."
+        gh api --method PATCH "notifications/threads/$notif_id" >/dev/null 2>&1
+      else
+        log "Notice: Mention notification $notif_id ($repo #$item_num) not yet indexed by comments API (${notif_age}s old); keeping unread for retry."
+      fi
     fi
-
-    # Mark notification as read so it is not processed repeatedly
-    gh api --method PATCH "notifications/threads/$notif_id" >/dev/null 2>&1
   done <<< "$notifications"
 }
 
@@ -375,6 +527,29 @@ poll_repo_comments() {
   done <<< "$comments"
 }
 
+poll_repo_pull_comments() {
+  local repo="$1"
+  local comments
+  comments=$(gh api "repos/$repo/pulls/comments?sort=created&direction=desc&per_page=15" \
+    -q '.[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.pull_request_url) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
+
+  while read -r comment_id pr_url comment_user comment_user_type; do
+    [ -z "$comment_id" ] && continue
+
+    if grep -qx "$comment_id" "$PROCESSED_FILE"; then
+      continue
+    fi
+
+    local item_num
+    item_num=$(basename "$pr_url")
+
+    local comment_body
+    comment_body=$(gh api "repos/$repo/pulls/comments/$comment_id" -q '.body' 2>/dev/null)
+
+    process_comment "$repo" "$item_num" "$comment_id" "$comment_user" "$comment_user_type" "$comment_body" "pulls/comments"
+  done <<< "$comments"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   log "=== Review Agent started as @$BOT_USER (Admin: @$ADMIN_USER) ==="
   log "Monitoring notifications and repos: ${WATCH_REPOS[*]:-(None specified)}"
@@ -385,6 +560,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
     for r in "${WATCH_REPOS[@]}"; do
       poll_repo_comments "$r"
+      poll_repo_pull_comments "$r"
     done
 
     sleep "$POLL_INTERVAL"

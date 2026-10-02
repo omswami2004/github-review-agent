@@ -110,8 +110,10 @@ chmod 600 .env
 | `WATCH_REPOS` | No | `""` | Space-separated list of `owner/repo` to actively poll for comments. |
 | `POLL_INTERVAL` | No | `15` | Polling loop interval in seconds. |
 | `AGY_TIMEOUT` | No | `15m0s` | Maximum execution timeout for Antigravity CLI reasoning. |
+| `AGY_MODELS` | No | `claude-sonnet-4-6 gemini-3.1-pro-high` | Space-separated models tried in order (see `agy models`). If one fails, e.g. its quota is exhausted, the next is used. |
 | `AGY_FLAGS` | No | `--dangerously-skip-permissions` | Additional CLI flags passed to `agy`. |
-| `BOT_FOOTER` | No | Generic notice | Custom footer appended to responses posted by the bot. |
+| `OWNER_NAME` | No | `$ADMIN_USER` | Name in the closing "Reviewed by *model* on behalf of *OWNER_NAME*" line of every response; links to `github.com/$ADMIN_USER`. |
+| `BOT_FOOTER` | No | None | Extra text appended to responses, before the "Reviewed by" line. |
 | `DATA_DIR` | No | `./data` | Directory where state files are stored. |
 | `PROCESSED_FILE` | No | `./data/processed_comments.txt` | File tracking processed comment IDs. |
 | `UNLOCKED_THREADS_FILE` | No | `./data/unlocked_threads.txt` | File tracking unlocked issue/PR threads. |
