@@ -66,7 +66,7 @@ AGY_TIMEOUT="${AGY_TIMEOUT:-15m0s}"
 AGY_FLAGS="${AGY_FLAGS:---dangerously-skip-permissions}"
 # Models tried in order (see `agy models`); the next one is used if a model fails,
 # e.g. because its quota is exhausted.
-AGY_MODELS="${AGY_MODELS:-claude-sonnet-4-6 gemini-3.8-flash-high gemini-3.1-pro-high}"
+AGY_MODELS="${AGY_MODELS:-gemini-3.8-flash-high claude-sonnet-5-5-high gemini-3.1-pro-high}"
 
 # Monitored repositories list
 if [ -n "${WATCH_REPOS:-}" ]; then
@@ -225,7 +225,13 @@ process_comment() {
   local item_type="Issue"
   local diff_file="/tmp/item_${item_num}_diff.txt"
   if gh pr diff "$item_num" -R "$repo" > "$diff_file" 2>/dev/null && [ -s "$diff_file" ]; then
-    truncated_diff=$(head -c 200000 "$diff_file")
+    local diff_size
+    diff_size=$(wc -c < "$diff_file")
+    if [ "$diff_size" -gt 90000 ]; then
+      truncated_diff="$(head -c 90000 "$diff_file")"$'\n\n[Diff truncated: exceeded 90KB limit for review prompt]'
+    else
+      truncated_diff=$(cat "$diff_file")
+    fi
     item_type="Pull Request"
   elif gh pr view "$item_num" -R "$repo" --json number >/dev/null 2>&1; then
     item_type="Pull Request"
@@ -307,6 +313,11 @@ Identity & Git Commit Policy:
 - All git commits MUST be authored and committed strictly by $BOT_USER <$GIT_AUTHOR_EMAIL>.
 PROMPT_EOF
   )
+
+  # Ensure full_prompt never exceeds Linux kernel MAX_ARG_STRLEN (128 KiB = 131,072 bytes)
+  if [ ${#full_prompt} -gt 120000 ]; then
+    full_prompt="${full_prompt:0:120000}"$'\n\n[Prompt truncated to stay within system argument limits]'
+  fi
 
   # Try each model in AGY_MODELS until one produces a reply
   local ai_reply="" agy_exit=1 model temp_output
