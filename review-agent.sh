@@ -306,6 +306,9 @@ Critical Execution Constraints:
 Instructions for Non-Review Requests:
 - If the user asks you to create a PR, write code, answer questions, explain logic, or take an action, execute or answer exactly what they asked clearly and directly without conversational preambles.
 
+Code Review Isolation:
+- When performing a code review, analyze the diff and codebase passively. NEVER checkout git branches, stash/pop changes, or modify files in local server workspaces.
+
 Identity & Git Commit Policy:
 - You are strictly $BOT_USER (email: $GIT_AUTHOR_EMAIL).
 - $ADMIN_USER is the repository maintainer/admin whom you listen to and never impersonate.
@@ -333,6 +336,17 @@ PROMPT_EOF
 
     ai_reply=$(cat "$temp_output")
     rm -f "$temp_output"
+
+    # Sanitize reply: strip intermediate agent loop/idle chatter and extract clean review
+    if echo "$ai_reply" | grep -q "## 📋 Code Review"; then
+      ai_reply=$(echo "$ai_reply" | awk '/## 📋 Code Review/{p=1} p')
+    else
+      ai_reply=$(echo "$ai_reply" | sed -E \
+        -e '/^No response received within the allotted time/d' \
+        -e '/^\*(Current Time|Active Task|Active Timers|Subagents|Background Work Remaining|Awaiting Asynchronous Event|State: IDLE|Turn Policy|Session ID|Next Steps|Next Step Trigger|Execution Context|Waiting for task ID|Process details|Idle Policy|Context check|Timeout condition|Notification channel|End of cycle marker|Task ID to monitor|Awaiting notification event|Sleeping|Event listener active|End of turn).*\*$/d' \
+        -e '/^\.\.\.$/d')
+      ai_reply=$(echo "$ai_reply" | awk 'NF{p=1} p')
+    fi
 
     if [ $agy_exit -eq 0 ] && [ -n "$ai_reply" ]; then
       # A short reply that reads like a quota error is a failure, not a review
