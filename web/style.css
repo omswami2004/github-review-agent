@@ -152,6 +152,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .status-posted, .attempt-ok { background: var(--ok-bg); color: var(--ok); }
 .status-failed, .status-post_failed, .attempt-failed, .attempt-quota { background: var(--bad-bg); color: var(--bad); }
 .status-running, .attempt-running { background: var(--run-bg); color: var(--run); }
+.status-queued { background: var(--selected); color: var(--accent); }
 
 .detail {
   min-width: 0;

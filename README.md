@@ -20,7 +20,8 @@ flowchart TD
     F -- Yes --> G{Access Control Check}
     G -- Not Authorized --> H[Log & Skip Unauthorized Mention]
     G -- Authorized / Unlocked --> I[Add 👀 Reaction to Acknowledge]
-    I --> J[Fetch Context / PR Diff]
+    I --> Q[Queue: answered one at a time, oldest first]
+    Q --> J[Fetch Context / PR Diff]
     J --> K[Invoke AI backends in order: Claude Code CLI, Claude API, agy]
     K --> L[Generate AI Review / Resolution]
     L --> M[Post Response Comment to GitHub]
@@ -36,7 +37,8 @@ flowchart TD
 - **Per-Comment Model Choice**: The admin can pick the model and effort for a single reply from the comment itself.
 - **Code Checkout**: Each reply gets a throwaway checkout of the repository at the PR's head commit, so the CLI backends can read the changed files in full, their callers and the tests, not just the diff.
 - **CI Instead of Local Builds**: The bot reads the PR's CI results rather than building or testing locally, and never uses or installs Nix.
-- **Immediate Acknowledgment**: Reacts to mentions with the `eyes` (👀) reaction while processing so authors know their request was received.
+- **Immediate Acknowledgment**: Reacts to mentions with the `eyes` (👀) reaction as soon as they are queued, so authors know their request was received.
+- **Queue**: Mentions are answered one at a time, oldest first. The ones waiting their turn show as Queued on the activity dashboard, with their place in line.
 - **Smart Access Control**:
   - **Admin Priority**: Immediately authorizes and responds to mentions from the designated repository admin (`ADMIN_USER`).
   - **Community Thread Unlocking**: Automatically unlocks issue/PR threads for broader contributor interaction once the admin participates or unlocks the thread.
@@ -155,6 +157,16 @@ Set `PR_CHECKOUT=false` to review from the diff alone.
 
 ---
 
+## How Mentions Are Queued
+
+The bot answers one mention at a time, oldest first. Each poll finds every new mention, queues the ones it should answer and reacts to each with 👀 straight away, so you know it was seen even when other replies are ahead of it. After each reply the bot polls again before taking the next mention, so anything posted in the meantime joins the end of the queue.
+
+On the [activity dashboard](#activity-dashboard), mentions waiting their turn are listed at the top as **Queued**, with their place in line ("next in line", "2nd in line"), and the header shows how many are waiting. A queued mention becomes a normal running record when its turn comes.
+
+A mention's notification stays unread until its reply is posted. If the agent restarts with mentions still queued, it drops their queued records and finds the mentions again on its first poll, so none are lost.
+
+---
+
 ## Activity Dashboard
 
 Every reply is recorded so you can see exactly what the bot did:
@@ -165,7 +177,7 @@ Every reply is recorded so you can see exactly what the bot did:
 - the final result with turns, tokens and the equivalent API cost
 - the reply that was posted
 
-A record is written while the bot works, so a reply in progress can be watched live. GitHub tokens and API keys are scrubbed before anything is written, and records older than `RUNS_KEEP_DAYS` (7 by default) are deleted.
+A record is written as soon as a mention is queued and updated while the bot works, so mentions waiting their turn are listed and a reply in progress can be watched live. GitHub tokens and API keys are scrubbed before anything is written, and records older than `RUNS_KEEP_DAYS` (7 by default) are deleted.
 
 Models never return their raw reasoning, only a readable summary of it, so the thinking shown is that summary. Showing summaries costs no extra tokens: the model thinks, and is billed, the same either way.
 

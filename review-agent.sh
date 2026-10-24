@@ -260,7 +260,7 @@ redact() {
 runs_index() {
   local runs="$DASHBOARD_DIR/runs" metas=("$DASHBOARD_DIR"/runs/*/meta.json)
   if [ -e "${metas[0]}" ]; then
-    jq -s 'sort_by(.started_at) | reverse' "${metas[@]}" 2>/dev/null
+    jq -s 'sort_by(.started_at // .queued_at) | reverse' "${metas[@]}" 2>/dev/null
   else
     echo '[]'
   fi > "$runs/index.json.tmp" && mv "$runs/index.json.tmp" "$runs/index.json"
@@ -272,8 +272,9 @@ runs_prune() {
   runs_index
 }
 
-# run_start REPO NUM COMMENT_ID COMMENT_API_PATH AUTHOR COMMENT: open a record for this reply
-run_start() {
+# run_queue REPO NUM COMMENT_ID COMMENT_API_PATH AUTHOR COMMENT: open a record for a reply waiting
+# its turn. queue_seq orders the waiting replies within the same second.
+run_queue() {
   RUN_DIR="$DASHBOARD_DIR/runs/$(date -u +%Y%m%dT%H%M%SZ)-${1//\//-}-$2-$3"
   mkdir -p "$RUN_DIR" || { RUN_DIR=""; return 1; }
   local anchor="#issuecomment-$3"
@@ -281,12 +282,17 @@ run_start() {
   [[ "$3" == subj_* ]] && anchor=""
   jq -n --arg id "${RUN_DIR##*/}" --arg repo "$1" --arg number "$2" --arg author "$5" --arg comment "$6" \
       --arg url "https://github.com/$1/issues/$2" --arg anchor "$anchor" \
-      --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+      --arg queued "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg seq "$(date +%s%N)" '{
         id: $id, repo: $repo, number: ($number | tonumber? // $number), author: $author,
-        comment: $comment, url: $url, comment_url: ($url + $anchor), started_at: $started,
-        status: "running", attempts: []
+        comment: $comment, url: $url, comment_url: ($url + $anchor), queued_at: $queued,
+        queue_seq: ($seq | tonumber), status: "queued", attempts: []
       }' | redact > "$RUN_DIR/meta.json"
   runs_index
+}
+
+# run_start: mark this reply's record as being worked on
+run_start() {
+  run_update '.status = "running" | .started_at = $t' --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
 # run_update FILTER [jq options...]: change this reply's meta.json with a jq filter
@@ -440,7 +446,27 @@ run_claude_api() {
   rm -f "$events_file"
 }
 
-process_comment() {
+# ------------------------------------------------------------------------------
+# Queue: mentions are answered one at a time, oldest first. QUEUE holds the
+# comment IDs in order and the Q_* arrays hold each one's details. A queued
+# mention's notification stays unread until it is answered, so a restart finds
+# it again.
+# ------------------------------------------------------------------------------
+QUEUE=()
+declare -A Q_REPO Q_NUM Q_USER Q_BODY Q_PATH Q_NOTIF Q_RUN
+
+# notif_queued NOTIFICATION_ID: whether a queued mention came from this notification
+notif_queued() {
+  local id
+  for id in "${QUEUE[@]}"; do
+    [ "${Q_NOTIF[$id]}" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# queue_comment REPO NUM COMMENT_ID AUTHOR AUTHOR_TYPE BODY [API_PATH] [NOTIFICATION_ID]: queue a
+# mention the bot should answer. Comments it ignores are recorded as processed.
+queue_comment() {
   local repo="$1"
   local item_num="$2"
   local comment_id="$3"
@@ -448,6 +474,7 @@ process_comment() {
   local comment_user_type="$5"
   local prompt_body="$6"
   local comment_api_path="${7:-issues/comments}"
+  local notif_id="${8:-}"
 
   if [ -z "$comment_id" ] || [ -z "$comment_user" ]; then
     return
@@ -455,6 +482,12 @@ process_comment() {
 
   # Already processed check
   if grep -qx "$comment_id" "$PROCESSED_FILE"; then
+    return
+  fi
+
+  # Already queued, perhaps found by the WATCH_REPOS scan before its notification
+  if [ -n "${Q_REPO[$comment_id]+queued}" ]; then
+    [ -z "${Q_NOTIF[$comment_id]}" ] && Q_NOTIF[$comment_id]="$notif_id"
     return
   fi
 
@@ -499,6 +532,63 @@ process_comment() {
     return
   fi
 
+  # 5. Fire eyes reaction to indicate acknowledgment
+  if [[ "$comment_id" =~ ^[0-9]+$ ]]; then
+    gh api --method POST \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "repos/$repo/$comment_api_path/$comment_id/reactions" \
+      -f content='eyes' >/dev/null 2>&1 &
+  elif [[ "$comment_id" =~ ^subj_ ]]; then
+    gh api --method POST \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "repos/$repo/issues/$item_num/reactions" \
+      -f content='eyes' >/dev/null 2>&1 &
+  fi
+
+  # Queue it, with a dashboard record that shows it waiting
+  run_queue "$repo" "$item_num" "$comment_id" "$comment_api_path" "$comment_user" "$prompt_body"
+  QUEUE+=("$comment_id")
+  Q_REPO[$comment_id]="$repo"
+  Q_NUM[$comment_id]="$item_num"
+  Q_USER[$comment_id]="$comment_user"
+  Q_BODY[$comment_id]="$prompt_body"
+  Q_PATH[$comment_id]="$comment_api_path"
+  Q_NOTIF[$comment_id]="$notif_id"
+  Q_RUN[$comment_id]="$RUN_DIR"
+  RUN_DIR=""
+  log "Queued mention from @$comment_user in $repo #$item_num (Comment ID: $comment_id); ${#QUEUE[@]} in the queue"
+}
+
+# answer_next: answer the mention at the head of the queue, then mark its notification read unless
+# another queued mention came from it
+answer_next() {
+  local id="${QUEUE[0]}"
+  local repo="${Q_REPO[$id]}" item_num="${Q_NUM[$id]}" user="${Q_USER[$id]}" body="${Q_BODY[$id]}"
+  local api_path="${Q_PATH[$id]}" notif_id="${Q_NOTIF[$id]}"
+  RUN_DIR="${Q_RUN[$id]}"
+  QUEUE=("${QUEUE[@]:1}")
+  unset "Q_REPO[$id]" "Q_NUM[$id]" "Q_USER[$id]" "Q_BODY[$id]" "Q_PATH[$id]" "Q_NOTIF[$id]" "Q_RUN[$id]"
+
+  answer_comment "$repo" "$item_num" "$id" "$user" "$body" "$api_path"
+
+  if [ -n "$notif_id" ] && ! notif_queued "$notif_id"; then
+    gh api --method PATCH "notifications/threads/$notif_id" >/dev/null 2>&1
+  fi
+}
+
+# answer_comment REPO NUM COMMENT_ID AUTHOR BODY API_PATH: write the reply to a queued mention and
+# post it. RUN_DIR is the mention's dashboard record.
+answer_comment() {
+  local repo="$1"
+  local item_num="$2"
+  local comment_id="$3"
+  local comment_user="$4"
+  local prompt_body="$5"
+  local comment_api_path="$6"
+  local thread_key="${repo}#${item_num}"
+
   log "Processing authorized mention from @$comment_user in $repo #$item_num (Comment ID: $comment_id)"
   log "Comment prompt: $prompt_body"
   local original_comment="$prompt_body"
@@ -518,25 +608,10 @@ process_comment() {
     log "Model for this reply: ${req_model:-configured default}, effort: $CLAUDE_EFFORT"
   fi
 
-  # Open the dashboard record for this reply
-  run_start "$repo" "$item_num" "$comment_id" "$comment_api_path" "$comment_user" "$original_comment"
+  # Move the dashboard record from queued to running
+  run_start
   run_update '.requested_model = $m | .effort = $e | .backends = $b' \
     --arg m "$req_model" --arg e "$CLAUDE_EFFORT" --arg b "$AI_BACKENDS"
-
-  # 5. Fire eyes reaction to indicate acknowledgment
-  if [[ "$comment_id" =~ ^[0-9]+$ ]]; then
-    gh api --method POST \
-      -H "Accept: application/vnd.github+json" \
-      -H "X-GitHub-Api-Version: 2022-11-28" \
-      "repos/$repo/$comment_api_path/$comment_id/reactions" \
-      -f content='eyes' >/dev/null 2>&1 &
-  elif [[ "$comment_id" =~ ^subj_ ]]; then
-    gh api --method POST \
-      -H "Accept: application/vnd.github+json" \
-      -H "X-GitHub-Api-Version: 2022-11-28" \
-      "repos/$repo/issues/$item_num/reactions" \
-      -f content='eyes' >/dev/null 2>&1 &
-  fi
 
   # 6. Check if this is a PR or Issue, and fetch diff if available
   local truncated_diff=""
@@ -756,7 +831,7 @@ PROMPT_EOF
 poll_notifications() {
   local notifications
   notifications=$(gh api notifications -q '
-    .[] | select((.reason=="mention" or .reason=="author" or .reason=="comment") and (.subject.type=="PullRequest" or .subject.type=="Issue"))
+    sort_by(.updated_at) | .[] | select((.reason=="mention" or .reason=="author" or .reason=="comment") and (.subject.type=="PullRequest" or .subject.type=="Issue"))
     | "\(.id) \(.repository.full_name) \(.subject.type) \(.subject.url) \(.subject.latest_comment_url // "none") \(.reason) \(.updated_at)"
   ' 2>&1)
   local notif_exit=$?
@@ -793,7 +868,7 @@ poll_notifications() {
         comment_body=$(echo "$comment_json" | jq -r '.body // empty')
 
         if [ -n "$comment_id" ]; then
-          process_comment "$repo" "$item_num" "$comment_id" "$comment_user" "$comment_user_type" "$comment_body" "$comment_api_path"
+          queue_comment "$repo" "$item_num" "$comment_id" "$comment_user" "$comment_user_type" "$comment_body" "$comment_api_path" "$notif_id"
           thread_handled=true
         fi
       fi
@@ -807,14 +882,14 @@ poll_notifications() {
       # Check issue-level comments for this issue/PR
       local matched_comments
       matched_comments=$(gh api "repos/$repo/issues/$item_num/comments?sort=created&direction=desc&per_page=10" \
-        -q '.[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
+        -q 'reverse | .[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
 
       while read -r c_id c_user c_utype; do
         [ -z "$c_id" ] && continue
         if ! grep -qx "$c_id" "$PROCESSED_FILE"; then
           local c_body
           c_body=$(gh api "repos/$repo/issues/comments/$c_id" -q '.body' 2>/dev/null)
-          process_comment "$repo" "$item_num" "$c_id" "$c_user" "$c_utype" "$c_body" "issues/comments"
+          queue_comment "$repo" "$item_num" "$c_id" "$c_user" "$c_utype" "$c_body" "issues/comments" "$notif_id"
         fi
         thread_handled=true
       done <<< "$matched_comments"
@@ -823,14 +898,14 @@ poll_notifications() {
       if [ "$subj_type" = "PullRequest" ]; then
         local matched_pull_comments
         matched_pull_comments=$(gh api "repos/$repo/pulls/$item_num/comments?sort=created&direction=desc&per_page=10" \
-          -q '.[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
+          -q 'reverse | .[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
 
         while read -r c_id c_user c_utype; do
           [ -z "$c_id" ] && continue
           if ! grep -qx "$c_id" "$PROCESSED_FILE"; then
             local c_body
             c_body=$(gh api "repos/$repo/pulls/comments/$c_id" -q '.body' 2>/dev/null)
-            process_comment "$repo" "$item_num" "$c_id" "$c_user" "$c_utype" "$c_body" "pulls/comments"
+            queue_comment "$repo" "$item_num" "$c_id" "$c_user" "$c_utype" "$c_body" "pulls/comments" "$notif_id"
           fi
           thread_handled=true
         done <<< "$matched_pull_comments"
@@ -850,11 +925,16 @@ poll_notifications() {
 
         if echo "$s_body" | grep -qi "@$BOT_USER"; then
           if ! grep -qx "$s_id" "$PROCESSED_FILE"; then
-            process_comment "$repo" "$item_num" "$s_id" "$s_user" "$s_utype" "$s_body" "issues/comments"
+            queue_comment "$repo" "$item_num" "$s_id" "$s_user" "$s_utype" "$s_body" "issues/comments" "$notif_id"
           fi
           thread_handled=true
         fi
       fi
+    fi
+
+    # A notification with a queued mention stays unread; answer_next marks it read
+    if notif_queued "$notif_id"; then
+      continue
     fi
 
     # Acknowledgment:
@@ -885,7 +965,7 @@ poll_repo_comments() {
   local repo="$1"
   local comments
   comments=$(gh api "repos/$repo/issues/comments?sort=created&direction=desc&per_page=15" \
-    -q '.[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.issue_url) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
+    -q 'reverse | .[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.issue_url) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
 
   while read -r comment_id issue_url comment_user comment_user_type; do
     [ -z "$comment_id" ] && continue
@@ -900,7 +980,7 @@ poll_repo_comments() {
     local comment_body
     comment_body=$(gh api "repos/$repo/issues/comments/$comment_id" -q '.body' 2>/dev/null)
 
-    process_comment "$repo" "$item_num" "$comment_id" "$comment_user" "$comment_user_type" "$comment_body" "issues/comments"
+    queue_comment "$repo" "$item_num" "$comment_id" "$comment_user" "$comment_user_type" "$comment_body" "issues/comments"
   done <<< "$comments"
 }
 
@@ -908,7 +988,7 @@ poll_repo_pull_comments() {
   local repo="$1"
   local comments
   comments=$(gh api "repos/$repo/pulls/comments?sort=created&direction=desc&per_page=15" \
-    -q '.[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.pull_request_url) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
+    -q 'reverse | .[] | select((.body | test("@'$BOT_USER'"; "i")) and .user.login != "'$BOT_USER'") | "\(.id) \(.pull_request_url) \(.user.login) \(.user.type // "User")"' 2>/dev/null)
 
   while read -r comment_id pr_url comment_user comment_user_type; do
     [ -z "$comment_id" ] && continue
@@ -923,7 +1003,7 @@ poll_repo_pull_comments() {
     local comment_body
     comment_body=$(gh api "repos/$repo/pulls/comments/$comment_id" -q '.body' 2>/dev/null)
 
-    process_comment "$repo" "$item_num" "$comment_id" "$comment_user" "$comment_user_type" "$comment_body" "pulls/comments"
+    queue_comment "$repo" "$item_num" "$comment_id" "$comment_user" "$comment_user_type" "$comment_body" "pulls/comments"
   done <<< "$comments"
 }
 
@@ -934,17 +1014,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # Worktrees left behind if the agent was stopped mid-reply
   rm -rf "$REPOS_DIR"/worktree.* 2>/dev/null
 
-  # Install the dashboard viewer next to the records, and mark replies cut off by a restart
+  # Install the dashboard viewer next to the records, and mark replies cut off by a restart. Queued
+  # records are dropped: their notifications are still unread, so they are queued again.
   mkdir -p "$DASHBOARD_DIR/runs"
   [ -d "$SCRIPT_DIR/web" ] && cp -r "$SCRIPT_DIR/web/." "$DASHBOARD_DIR/"
   for meta in "$DASHBOARD_DIR"/runs/*/meta.json; do
-    [ -f "$meta" ] && RUN_DIR="${meta%/meta.json}" &&
-      [ "$(jq -r .status "$meta")" = "running" ] && run_update '.status = "interrupted"'
+    [ -f "$meta" ] || continue
+    RUN_DIR="${meta%/meta.json}"
+    case "$(jq -r .status "$meta")" in
+      running) run_update '.status = "interrupted"' ;;
+      queued) rm -rf "$RUN_DIR" ;;
+    esac
   done
   RUN_DIR=""
   runs_prune
 
-  # Polling loop
+  # Polling loop. After each reply it polls again before answering the next queued mention, so
+  # mentions made in the meantime show up as queued on the dashboard.
   while true; do
     poll_notifications
 
@@ -953,6 +1039,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       poll_repo_pull_comments "$r"
     done
 
-    sleep "$POLL_INTERVAL"
+    if [ ${#QUEUE[@]} -gt 0 ]; then
+      answer_next
+    else
+      sleep "$POLL_INTERVAL"
+    fi
   done
 fi

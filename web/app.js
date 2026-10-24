@@ -9,6 +9,7 @@
 const POLL_MS = 4000;
 const OUTPUT_PREVIEW_CHARS = 3000;
 const STATUS_LABELS = {
+  queued: "Queued",
   running: "Running",
   posted: "Posted",
   failed: "Failed",
@@ -18,6 +19,9 @@ const STATUS_LABELS = {
 
 // Pixels from the bottom of the detail pane that still count as "at the bottom"
 const BOTTOM_SLACK = 48;
+
+// Every reply sits in the queue for a moment; shorter waits than this aren't shown
+const WAIT_SHOWN_MS = 60000;
 
 const state = { runs: [], indexText: "", selectedId: null, detailKey: "", shownId: null, renderSeq: 0, expanded: new Set(), polling: false };
 const $ = (id) => document.getElementById(id);
@@ -106,6 +110,19 @@ function formatNumber(n) {
   return typeof n === "number" ? n.toLocaleString() : "";
 }
 
+// Replies waiting their turn, next in line first
+function queuedRuns() {
+  return state.runs.filter((run) => run.status === "queued").sort((a, b) => a.queue_seq - b.queue_seq);
+}
+
+// 1 -> "next in line", 2 -> "2nd in line"
+function placeText(place) {
+  if (place < 1) return "";
+  if (place === 1) return "next in line";
+  const suffix = place % 100 >= 11 && place % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][place % 10] || "th";
+  return `${place}${suffix} in line`;
+}
+
 function statusBadge(status) {
   return el("span", { class: `badge status-${status}`, text: STATUS_LABELS[status] || status || "Unknown" });
 }
@@ -163,14 +180,18 @@ async function loadIndex() {
 function renderList() {
   const query = $("filter").value.trim().toLowerCase();
   const status = $("status-filter").value;
-  const runs = state.runs.filter((run) => {
+  // Queued replies go on top, last in line first, since the list runs newest first
+  const queued = queuedRuns();
+  const ordered = [...queued].reverse().concat(state.runs.filter((run) => run.status !== "queued"));
+  const runs = ordered.filter((run) => {
     if (status && run.status !== status) return false;
     if (!query) return true;
     return [run.repo, run.author, run.comment, String(run.number)].join(" ").toLowerCase().includes(query);
   });
 
   const running = state.runs.filter((run) => run.status === "running").length;
-  $("summary").textContent = `${state.runs.length} ${state.runs.length === 1 ? "reply" : "replies"} recorded`;
+  $("summary").textContent = `${state.runs.length} ${state.runs.length === 1 ? "reply" : "replies"} recorded` +
+    (queued.length ? ` · ${queued.length} queued` : "");
   $("live").hidden = running === 0;
   $("empty").hidden = state.runs.length > 0;
 
@@ -189,7 +210,9 @@ function renderList() {
           el(
             "div",
             { class: "run-meta muted" },
-            `@${run.author} · ${timeAgo(run.started_at)}`,
+            run.status === "queued"
+              ? `@${run.author} · queued ${timeAgo(run.queued_at)} · ${placeText(queued.indexOf(run) + 1)}`
+              : `@${run.author} · ${timeAgo(run.started_at)}`,
             model ? ` · ${modelName(model)}` : "",
             run.finished_at ? ` · ${formatDuration(between(run.started_at, run.finished_at))}` : ""
           )
@@ -440,7 +463,8 @@ async function renderDetail(force = false) {
       attemptSizes.push("?");
     }
   }
-  const key = JSON.stringify([run, attemptSizes]);
+  const place = run.status === "queued" ? queuedRuns().findIndex((queued) => queued.id === run.id) + 1 : 0;
+  const key = JSON.stringify([run, attemptSizes, place]);
   if (id !== state.selectedId || (!force && key === state.detailKey)) return;
   state.detailKey = key;
   // Another reply being selected, or a newer render, makes this one stale
@@ -453,10 +477,13 @@ async function renderDetail(force = false) {
     run.reply_url ? githubLink(run.reply_url, "View the posted reply on GitHub") : null);
 
   const comment = el("div", { class: "comment" },
-    el("div", { class: "muted small" }, githubLink(run.comment_url, `@${run.author} commented`), ` · ${formatTime(run.started_at)}`),
+    el("div", { class: "muted small" }, githubLink(run.comment_url, `@${run.author} commented`), ` · ${formatTime(run.started_at || run.queued_at)}`),
     el("div", { class: "comment-text", text: run.comment || "" }));
 
+  const waited = between(run.queued_at, run.started_at);
   const facts = el("dl", { class: "facts" },
+    fact("Place in queue", placeText(place)),
+    fact("Waited in queue", run.started_at && waited >= WAIT_SHOWN_MS ? formatDuration(waited) : ""),
     fact("Type", run.type),
     fact("Answered by", run.answered_by ? `${modelName(run.answered_by.model)} (${run.answered_by.backend})` : ""),
     fact("Requested model", run.requested_model ? modelName(run.requested_model) : ""),
@@ -464,13 +491,16 @@ async function renderDetail(force = false) {
     fact("Backends", run.backends),
     fact("CI", run.ci),
     fact("Checkout", run.checkout ? `commit ${run.checkout}` : ""),
-    fact("Duration", formatDuration(between(run.started_at, run.finished_at)) + (run.finished_at ? "" : " so far")));
+    fact("Duration", run.started_at ? formatDuration(between(run.started_at, run.finished_at)) + (run.finished_at ? "" : " so far") : ""));
 
   const attempts = await Promise.all((run.attempts || []).map((attempt) => renderAttempt(run, attempt)));
 
   const sections = [header, comment, facts];
   sections.push(el("h3", { class: "section-title", text: "Activity" }));
-  sections.push(...(attempts.length ? attempts : [el("p", { class: "muted", text: "Gathering the diff, CI results and the code checkout..." })]));
+  const waiting = run.status === "queued"
+    ? "Waiting for its turn. The bot answers one mention at a time, oldest first."
+    : "Gathering the diff, CI results and the code checkout...";
+  sections.push(...(attempts.length ? attempts : [el("p", { class: "muted", text: waiting })]));
   if (run.status === "posted" || run.status === "post_failed") {
     try {
       const reply = await fetchText(`runs/${encodeURIComponent(id)}/reply.md`);
@@ -521,7 +551,7 @@ async function poll() {
   try {
     await loadIndex();
     const selected = state.runs.find((run) => run.id === state.selectedId);
-    if (selected && (selected.status === "running" || state.detailKey === "")) await renderDetail();
+    if (selected && (selected.status === "running" || selected.status === "queued" || state.detailKey === "")) await renderDetail();
   } finally {
     state.polling = false;
   }
