@@ -16,7 +16,10 @@ const STATUS_LABELS = {
   interrupted: "Interrupted",
 };
 
-const state = { runs: [], indexText: "", selectedId: null, detailKey: "" };
+// Pixels from the bottom of the detail pane that still count as "at the bottom"
+const BOTTOM_SLACK = 48;
+
+const state = { runs: [], indexText: "", selectedId: null, detailKey: "", shownId: null, renderSeq: 0, expanded: new Set(), polling: false };
 const $ = (id) => document.getElementById(id);
 
 // ---------------------------------------------------------------------------
@@ -115,10 +118,11 @@ function modelName(id) {
   return `Claude ${family} ${match[2]}${match[3] ? "." + match[3] : ""}`;
 }
 
-// Long tool output is shown in part, with a button for the rest
-function collapsibleOutput(text, isError) {
-  const pre = el("pre", { class: isError ? "output error" : "output" });
-  if (text.length <= OUTPUT_PREVIEW_CHARS) {
+// Long tool output is shown in part, with a button for the rest. The key keeps
+// the box expanded and scrolled where it was when the page refreshes it
+function collapsibleOutput(text, isError, key) {
+  const pre = el("pre", { class: isError ? "output error" : "output", "data-scroll-key": key });
+  if (text.length <= OUTPUT_PREVIEW_CHARS || state.expanded.has(key)) {
     pre.textContent = text || "(no output)";
     return pre;
   }
@@ -127,6 +131,7 @@ function collapsibleOutput(text, isError) {
     class: "link-button",
     text: `Show all ${formatNumber(text.length)} characters`,
     onclick: () => {
+      if (key) state.expanded.add(key);
       pre.textContent = text;
       more.remove();
     },
@@ -294,7 +299,7 @@ function renderCliAttempt(events, run) {
               ? el("div", { class: "muted small", text: "Waiting for output..." })
               : el("details", { "data-key": `out-${block.id}` },
                   el("summary", { text: output.is_error ? "Error output" : `Output (${formatNumber(outputText.length)} characters)` }),
-                  collapsibleOutput(outputText, output.is_error))
+                  collapsibleOutput(outputText, output.is_error, `out-${block.id}`))
           ), { nested }));
         }
       }
@@ -356,7 +361,7 @@ async function renderAttempt(run, attempt) {
   let body;
   try {
     const text = await fetchText(`runs/${encodeURIComponent(run.id)}/${encodeURIComponent(attempt.file)}`);
-    if (attempt.backend === "agy") body = [item("text", "Output", collapsibleOutput(text, false))];
+    if (attempt.backend === "agy") body = [item("text", "Output", collapsibleOutput(text, false, `attempt-${attempt.n}`))];
     else {
       const events = parseJsonLines(text);
       body = attempt.backend === "claude-cli" ? renderCliAttempt(events, run) : renderApiAttempt(events);
@@ -382,20 +387,50 @@ function fact(label, value) {
   return value ? [el("dt", { text: label }), el("dd", {}, value)] : [];
 }
 
+function nearBottom(node) {
+  return node.scrollTop + node.clientHeight >= node.scrollHeight - BOTTOM_SLACK;
+}
+
+// Swap in freshly rendered content without moving the reader. Everything here
+// runs in one go, after all fetches, so a scroll made while the page was
+// fetching is kept instead of being undone. Returns whether content was added
+// below what the reader can see.
+function swapDetail(sections) {
+  const detail = $("detail");
+  const open = new Set([...detail.querySelectorAll("details[open][data-key]")].map((node) => node.dataset.key));
+  const scrolled = new Map([...detail.querySelectorAll("[data-scroll-key]")].map((node) => [node.dataset.scrollKey, node.scrollTop]));
+  const scroll = detail.scrollTop;
+  const height = detail.scrollHeight;
+
+  detail.replaceChildren(...sections);
+  for (const node of detail.querySelectorAll("details[data-key]")) {
+    if (open.has(node.dataset.key)) node.open = true;
+  }
+  for (const node of detail.querySelectorAll("[data-scroll-key]")) {
+    const top = scrolled.get(node.dataset.scrollKey);
+    if (top) node.scrollTop = top;
+  }
+  // Writing scrollTop stops a scroll in progress, so only write it if it moved
+  if (detail.scrollTop !== scroll) detail.scrollTop = scroll;
+  return detail.scrollHeight > height && !nearBottom(detail);
+}
+
 async function renderDetail(force = false) {
   const id = state.selectedId;
-  const detail = $("detail");
   if (!id) return;
 
   let run;
   try {
     run = JSON.parse(await fetchText(`runs/${encodeURIComponent(id)}/meta.json`));
   } catch {
-    detail.replaceChildren(el("p", { class: "muted placeholder", text: "This reply's record is gone (records are deleted after a week)." }));
+    if (id === state.selectedId) {
+      swapDetail([el("p", { class: "muted placeholder", text: "This reply's record is gone (records are deleted after a week)." })]);
+      state.shownId = null;
+    }
     return;
   }
 
-  // Re-render only when something changed; keep open sections and the scroll position
+  // Re-render only when something changed
   const attemptSizes = [];
   for (const attempt of run.attempts || []) {
     try {
@@ -406,10 +441,11 @@ async function renderDetail(force = false) {
     }
   }
   const key = JSON.stringify([run, attemptSizes]);
-  if (!force && key === state.detailKey) return;
+  if (id !== state.selectedId || (!force && key === state.detailKey)) return;
   state.detailKey = key;
-  const open = new Set([...detail.querySelectorAll("details[open][data-key]")].map((node) => node.dataset.key));
-  const scroll = detail.scrollTop;
+  // Another reply being selected, or a newer render, makes this one stale
+  const seq = ++state.renderSeq;
+  const stale = () => seq !== state.renderSeq || id !== state.selectedId;
 
   const header = el("div", { class: "detail-header" },
     el("a", { href: "#", class: "back", text: "All replies" }),
@@ -446,16 +482,17 @@ async function renderDetail(force = false) {
   }
   try {
     const prompt = await fetchText(`runs/${encodeURIComponent(id)}/prompt.txt`);
-    sections.push(el("details", { "data-key": "prompt" }, el("summary", { text: `Prompt sent to the model (${formatNumber(prompt.length)} characters)` }), collapsibleOutput(prompt, false)));
+    sections.push(el("details", { "data-key": "prompt" }, el("summary", { text: `Prompt sent to the model (${formatNumber(prompt.length)} characters)` }), collapsibleOutput(prompt, false, "prompt")));
   } catch {
     // The prompt isn't written yet
   }
 
-  detail.replaceChildren(...sections);
-  for (const node of detail.querySelectorAll("details[data-key]")) {
-    if (open.has(node.dataset.key)) node.open = true;
-  }
-  detail.scrollTop = scroll;
+  if (stale()) return;
+  const update = state.shownId === id;
+  const grewBelow = swapDetail(sections);
+  state.shownId = id;
+  // On a live update, point out new activity below instead of scrolling to it
+  if (update && grewBelow) $("jump").hidden = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -465,23 +502,41 @@ function selectFromHash() {
   const match = /run=([^&]+)/.exec(location.hash);
   state.selectedId = match ? decodeURIComponent(match[1]) : null;
   state.detailKey = "";
+  state.shownId = null;
+  state.expanded.clear();
+  $("jump").hidden = true;
   document.body.classList.toggle("has-selection", Boolean(state.selectedId));
   renderList();
   if (state.selectedId) {
     $("detail").replaceChildren(el("p", { class: "muted placeholder", text: "Loading..." }));
+    $("detail").scrollTop = 0;
     renderDetail(true);
   }
 }
 
 async function poll() {
-  await loadIndex();
-  const selected = state.runs.find((run) => run.id === state.selectedId);
-  if (selected && (selected.status === "running" || state.detailKey === "")) await renderDetail();
+  // A slow poll must not overlap the next one
+  if (state.polling) return;
+  state.polling = true;
+  try {
+    await loadIndex();
+    const selected = state.runs.find((run) => run.id === state.selectedId);
+    if (selected && (selected.status === "running" || state.detailKey === "")) await renderDetail();
+  } finally {
+    state.polling = false;
+  }
 }
 
 $("filter").addEventListener("input", renderList);
 $("status-filter").addEventListener("change", renderList);
 window.addEventListener("hashchange", selectFromHash);
+$("detail").addEventListener("scroll", () => {
+  if (nearBottom($("detail"))) $("jump").hidden = true;
+}, { passive: true });
+$("jump").addEventListener("click", () => {
+  $("detail").scrollTop = $("detail").scrollHeight;
+  $("jump").hidden = true;
+});
 
 loadIndex().then(selectFromHash);
 setInterval(poll, POLL_MS);

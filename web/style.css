@@ -160,6 +160,23 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
   min-height: 0;
 }
 .placeholder { margin-top: 40px; text-align: center; }
+
+/* Shown when a live update adds activity below what the reader can see */
+.jump {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--run);
+  background: var(--run-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 6px 14px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
 .back { display: none; margin-bottom: 8px; }
 
 .detail-header h2 { margin: 0 0 4px; font-size: 18px; }
