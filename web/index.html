@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Review Agent Activity</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Review agent</h1>
+    <span id="summary" class="muted"></span>
+    <span id="live" class="live" hidden>Live</span>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="filters">
+        <input id="filter" type="search" placeholder="Filter by repo, author or comment" aria-label="Filter">
+        <select id="status-filter" aria-label="Status">
+          <option value="">All statuses</option>
+          <option value="running">Running</option>
+          <option value="posted">Posted</option>
+          <option value="failed">Failed</option>
+          <option value="post_failed">Post failed</option>
+          <option value="interrupted">Interrupted</option>
+        </select>
+      </div>
+      <ol id="runs" class="runs"></ol>
+      <p id="empty" class="muted empty" hidden>No replies recorded yet. Records are kept for a week.</p>
+    </aside>
+
+    <main class="detail" id="detail">
+      <p class="muted placeholder">Select a reply to see what the bot did.</p>
+    </main>
+  </div>
+
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

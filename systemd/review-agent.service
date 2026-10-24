@@ -1,5 +1,5 @@
 [Unit]
-Description=GitHub Review & Assistant Agent (Antigravity CLI)
+Description=GitHub Review & Assistant Agent (Claude / Antigravity CLI)
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -9,7 +9,7 @@ Type=simple
 WorkingDirectory=%h/github-review-agent
 ExecStart=/usr/bin/env bash %h/github-review-agent/review-agent.sh
 
-# `agy` is usually installed to ~/.local/bin, which is not on systemd's default PATH
+# `claude` and `agy` are usually installed to ~/.local/bin, which is not on systemd's default PATH
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # Environment file containing credentials and bot configuration
@@ -26,6 +26,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=%h
+# The dashboard records, when DASHBOARD_DIR points outside the home directory for nginx to
+# serve. The leading "-" skips the path if it doesn't exist.
+ReadWritePaths=-/srv/review-agent
 
 # Standard output and logging
 StandardOutput=journal
