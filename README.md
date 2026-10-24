@@ -196,6 +196,23 @@ server {
 }
 ```
 
+**Setting or changing the password.** nginx checks the login against `/etc/nginx/review-agent.htpasswd`. Manage it with `htpasswd` (from the `apache2-utils` package), which prompts for the password and with `-B` stores it as a bcrypt hash:
+
+```bash
+# Change the password of user "om" (or add another user)
+sudo htpasswd -B /etc/nginx/review-agent.htpasswd om
+
+# First time only: -c creates the file, and replaces it if it already exists
+sudo htpasswd -cB /etc/nginx/review-agent.htpasswd om
+sudo chown root:www-data /etc/nginx/review-agent.htpasswd
+sudo chmod 640 /etc/nginx/review-agent.htpasswd
+
+# Remove a user
+sudo htpasswd -D /etc/nginx/review-agent.htpasswd om
+```
+
+nginx reads the file on every request, so a new password works at once, with no reload. If you keep a note of the login on the machine, update it too.
+
 ---
 
 ## Choosing the Model from a Comment
