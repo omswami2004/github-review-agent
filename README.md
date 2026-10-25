@@ -179,7 +179,7 @@ The bot answers two kinds of people, set on the dashboard's **Settings** page. E
 | Tools | All of them (see [How the Bot Sees the Code](#how-the-bot-sees-the-code)) | Read and search the PR's checkout, nothing else |
 | Models | The admins' default and fallback, or `--model` / `--effort` in the comment | The contributors' default and fallback |
 
-The page also sets each group's Claude models and effort, and how many reviews one contributor can get in 24 hours (0 for no limit). Saved changes apply from the next mention, with no restart.
+People are added by GitHub username, with or without the `@`, and several at once separated by spaces or commas. The page also sets each group's Claude models and effort, and how many reviews one contributor can get in 24 hours (0 for no limit). Saved changes apply from the next mention, with no restart.
 
 **What a contributor gets.** On a pull request, the bot writes a review in the usual format, using the comment only as a hint about what to focus on. If the comment asks for something else, the bot doesn't do it, and says that it only reviews pull requests for contributors. On an issue, it replies that it only reviews pull requests. Past the daily limit, it replies that they should ask again later. These replies don't use a model.
 

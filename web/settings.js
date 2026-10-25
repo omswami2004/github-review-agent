@@ -78,8 +78,9 @@ const code = (text) => el("code", { text });
 // ---------------------------------------------------------------------------
 // Form parts
 // ---------------------------------------------------------------------------
-// Usernames as removable chips, with a field to add more. key names the field's draft, and fixed
-// chips (the owner) can't be removed.
+// Usernames as removable chips, with a field to add more. Several names can be typed at once,
+// separated by spaces or commas, with or without a leading @. key names the field's draft, and
+// fixed chips (the owner) can't be removed.
 function userList(list, key, { fixed = [], placeholder = "GitHub username" } = {}) {
   const add = () => {
     const { valid, invalid } = parseUsers(state.drafts[key] || "");
@@ -138,7 +139,7 @@ function adminsCard() {
       "They can also pick the model for one reply with ", code("--model"), " and ", code("--effort"), " in their comment."],
     userList(state.settings.admins, "admins", {
       fixed: owner ? [{ name: owner, note: "owner", title: "ADMIN_USER in .env is always an admin" }] : [],
-      placeholder: "Add admins by GitHub username",
+      placeholder: "Add admins by GitHub username (the @ is optional)",
     }));
 }
 
@@ -176,7 +177,7 @@ function repoItem(repo, index) {
     repo.who === "anyone"
       ? el("p", { class: "muted small repo-note", text: "Anyone on GitHub who comments on a pull request here can ask for a review." })
       : el("div", {},
-          userList(repo.users, key, { placeholder: "Add people by GitHub username" }),
+          userList(repo.users, key, { placeholder: "Add people by GitHub username (the @ is optional)" }),
           repo.users.length ? null : el("p", { class: "field-warning", text: "Nobody can ask here until you add people." })));
 }
 
