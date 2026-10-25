@@ -17,6 +17,8 @@ const STATUS_LABELS = {
   interrupted: "Interrupted",
 };
 
+const ROLE_LABELS = { admin: "Admin", contributor: "Contributor (review only)" };
+
 // Pixels from the bottom of the detail pane that still count as "at the bottom"
 const BOTTOM_SLACK = 48;
 
@@ -24,27 +26,10 @@ const BOTTOM_SLACK = 48;
 const WAIT_SHOWN_MS = 60000;
 
 const state = { runs: [], indexText: "", selectedId: null, detailKey: "", shownId: null, renderSeq: 0, expanded: new Set(), polling: false };
-const $ = (id) => document.getElementById(id);
 
 // ---------------------------------------------------------------------------
-// Small helpers
+// Small helpers (el, $ and modelName are in common.js)
 // ---------------------------------------------------------------------------
-function el(tag, attrs = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [key, value] of Object.entries(attrs)) {
-    if (value == null || value === false) continue;
-    if (key === "class") node.className = value;
-    else if (key === "text") node.textContent = value;
-    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
-    else node.setAttribute(key, value === true ? "" : value);
-  }
-  for (const child of children.flat()) {
-    if (child == null || child === false) continue;
-    node.append(child instanceof Node ? child : String(child));
-  }
-  return node;
-}
-
 function markdown(text) {
   const node = el("div", { class: "md" });
   node.innerHTML = DOMPurify.sanitize(marked.parse(text || "", { gfm: true }));
@@ -127,14 +112,6 @@ function statusBadge(status) {
   return el("span", { class: `badge status-${status}`, text: STATUS_LABELS[status] || status || "Unknown" });
 }
 
-// claude-opus-5-5 -> Claude Opus 5.5
-function modelName(id) {
-  const match = /^claude-([a-z]+)-(\d+)(?:-(\d+))?$/.exec(id || "");
-  if (!match) return id || "";
-  const family = match[1][0].toUpperCase() + match[1].slice(1);
-  return `Claude ${family} ${match[2]}${match[3] ? "." + match[3] : ""}`;
-}
-
 // Long tool output is shown in part, with a button for the rest. The key keeps
 // the box expanded and scrolled where it was when the page refreshes it
 function collapsibleOutput(text, isError, key) {
@@ -210,9 +187,11 @@ function renderList() {
           el(
             "div",
             { class: "run-meta muted" },
+            `@${run.author}`,
+            run.role === "contributor" ? " (contributor)" : "",
             run.status === "queued"
-              ? `@${run.author} · queued ${timeAgo(run.queued_at)} · ${placeText(queued.indexOf(run) + 1)}`
-              : `@${run.author} · ${timeAgo(run.started_at)}`,
+              ? ` · queued ${timeAgo(run.queued_at)} · ${placeText(queued.indexOf(run) + 1)}`
+              : ` · ${timeAgo(run.started_at)}`,
             model ? ` · ${modelName(model)}` : "",
             run.finished_at ? ` · ${formatDuration(between(run.started_at, run.finished_at))}` : ""
           )
@@ -484,6 +463,7 @@ async function renderDetail(force = false) {
   const facts = el("dl", { class: "facts" },
     fact("Place in queue", placeText(place)),
     fact("Waited in queue", run.started_at && waited >= WAIT_SHOWN_MS ? formatDuration(waited) : ""),
+    fact("Asked as", ROLE_LABELS[run.role] || ""),
     fact("Type", run.type),
     fact("Answered by", run.answered_by ? `${modelName(run.answered_by.model)} (${run.answered_by.backend})` : ""),
     fact("Requested model", run.requested_model ? modelName(run.requested_model) : ""),

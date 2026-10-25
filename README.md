@@ -2,7 +2,7 @@
 
 An autonomous GitHub review and coding assistant agent powered by Claude (through the Claude Code CLI or the Claude API) or Google Antigravity CLI (`agy`). The bot continuously monitors GitHub notifications and repository comments, reviews pull request diffs, answers issues, executes code modifications, and responds directly on GitHub threads.
 
-**Quick start:** run `./setup.sh`. It stops the service, lets you pick the backend and the default model, tests them on the spot, and redeploys the service when you type `done`. To use a different model for one reply, put `--model` in your comment (see [Choosing the model from a comment](#choosing-the-model-from-a-comment)).
+**Quick start:** run `./setup.sh`. It stops the service, lets you pick the backend and the default model, tests them on the spot, and redeploys the service when you type `done`. To use a different model for one reply, put `--model` in your comment (see [Choosing the model from a comment](#choosing-the-model-from-a-comment)). Who may ask the bot, and the models each of them gets, are set on the dashboard's settings page (see [Who Can Ask the Bot](#who-can-ask-the-bot)).
 
 ---
 
@@ -17,15 +17,15 @@ flowchart TD
     E -- Yes --> D
     E -- No --> F{Mentions @BOT_USER?}
     F -- No --> D
-    F -- Yes --> G{Access Control Check}
-    G -- Not Authorized --> H[Log & Skip Unauthorized Mention]
-    G -- Authorized / Unlocked --> I[Add 👀 Reaction to Acknowledge]
+    F -- Yes --> G{Access settings: admin, contributor or neither?}
+    G -- Neither --> H[Log & Skip Unauthorized Mention]
+    G -- Admin: anything / Contributor: PR review only --> I[Add 👀 Reaction to Acknowledge]
     I --> Q[Queue: answered one at a time, oldest first]
     Q --> J[Fetch Context / PR Diff]
     J --> K[Invoke AI backends in order: Claude Code CLI, Claude API, agy]
     K --> L[Generate AI Review / Resolution]
     L --> M[Post Response Comment to GitHub]
-    M --> N[Mark Comment Processed & Unlock Thread]
+    M --> N[Mark Comment Processed]
 ```
 
 ---
@@ -34,14 +34,14 @@ flowchart TD
 
 - **Automated Code Reviews & Assistance**: Uses Claude or Antigravity CLI (`agy`) to inspect diffs, test builds, review pull requests, and explain complex code logic.
 - **Backend & Model Fallback**: Tries each backend in `AI_BACKENDS`, and each of its models, until one replies, so a used-up plan or API quota doesn't stop the bot.
-- **Per-Comment Model Choice**: The admin can pick the model and effort for a single reply from the comment itself.
+- **Per-Comment Model Choice**: Admins can pick the model and effort for a single reply from the comment itself.
 - **Code Checkout**: Each reply gets a throwaway checkout of the repository at the PR's head commit, so the CLI backends can read the changed files in full, their callers and the tests, not just the diff.
 - **CI Instead of Local Builds**: The bot reads the PR's CI results rather than building or testing locally, and never uses or installs Nix.
 - **Immediate Acknowledgment**: Reacts to mentions with the `eyes` (👀) reaction as soon as they are queued, so authors know their request was received.
 - **Queue**: Mentions are answered one at a time, oldest first. The ones waiting their turn show as Queued on the activity dashboard, with their place in line.
-- **Smart Access Control**:
-  - **Admin Priority**: Immediately authorizes and responds to mentions from the designated repository admin (`ADMIN_USER`).
-  - **Community Thread Unlocking**: Automatically unlocks issue/PR threads for broader contributor interaction once the admin participates or unlocks the thread.
+- **Access Control, Set on the Dashboard**:
+  - **Admins** (`ADMIN_USER` and anyone you add) can ask for anything, in any repo.
+  - **Contributors** can ask for a review of a pull request, and nothing else, in the repos you open to them: to anyone, or only to the people you list. Their reviews run with read-only tools, their own models and a daily limit.
   - **Loop Prevention**: Automatically ignores bots (such as CI/CD bots, Vercel bot, or self).
 - **Dual Polling Engine**: Monitors GitHub unread notifications as well as active repository comment feeds (`WATCH_REPOS`).
 - **Identity Isolation**: Commits and responses are strictly signed and authored by the bot identity, preserving maintainer credentials.
@@ -167,6 +167,43 @@ A mention's notification stays unread until its reply is posted. If the agent re
 
 ---
 
+## Who Can Ask the Bot
+
+The bot answers two kinds of people, set on the dashboard's **Settings** page. Everyone else who mentions it is ignored.
+
+| | Admins | Contributors |
+| :--- | :--- | :--- |
+| Who | `ADMIN_USER`, always, and anyone you add | In each repo you open to contributors: anyone, or only the people you list |
+| Where | Any repo | Only those repos, and only on pull requests |
+| What | Anything: reviews, answers, code changes, pull requests | A review of the pull request, whatever the comment asks |
+| Tools | All of them (see [How the Bot Sees the Code](#how-the-bot-sees-the-code)) | Read and search the PR's checkout, nothing else |
+| Models | The admins' default and fallback, or `--model` / `--effort` in the comment | The contributors' default and fallback |
+
+The page also sets each group's Claude models and effort, and how many reviews one contributor can get in 24 hours (0 for no limit). Saved changes apply from the next mention, with no restart.
+
+**What a contributor gets.** On a pull request, the bot writes a review in the usual format, using the comment only as a hint about what to focus on. If the comment asks for something else, the bot doesn't do it, and says that it only reviews pull requests for contributors. On an issue, it replies that it only reviews pull requests. Past the daily limit, it replies that they should ask again later. These replies don't use a model.
+
+**How contributor reviews are limited.** A comment from someone outside the project is untrusted, so the limits are enforced by the tools, not just the prompt:
+
+- `claude` runs with `--restricted --tools Read,Grep,Glob`. It can read and search files but has no tool that runs commands or fetches URLs, file reads can't leave the PR's checkout (symlinks included), and no settings file is loaded. With no checkout, it runs in an empty directory.
+- It gets no GitHub token, so it can't post, push or open anything. The agent posts the review.
+- `agy` can't be restricted this way, so it never answers a contributor. `claude-api` has no tools at all.
+
+**Where the settings live.** `data/access.json` (`ACCESS_FILE`). The agent writes it on its first start, with `ADMIN_USER` as the only admin, the admins' models from `CLAUDE_MODELS` and `CLAUDE_EFFORT`, and no repo open to contributors. After that, the file's models are the ones used, for both Claude backends; `./setup.sh` writes the admin models you pick there too. The page saves the file through a small settings API, `settings-server.mjs` (Node, no dependencies), which checks every change before it writes it. It runs as `review-agent-settings.service` on `127.0.0.1:9098`, and `./setup.sh` installs and restarts it along with the agent. To serve it on the dashboard, add this to the dashboard's nginx `server` block, inside the password-protected part (see [Activity Dashboard](#activity-dashboard)):
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:9098;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Remote-User $remote_user;
+    client_max_body_size 64k;
+}
+```
+
+The API only accepts changes sent from the dashboard page itself, and records which dashboard user saved them.
+
+---
+
 ## Activity Dashboard
 
 Every reply is recorded so you can see exactly what the bot did:
@@ -177,11 +214,11 @@ Every reply is recorded so you can see exactly what the bot did:
 - the final result with turns, tokens and the equivalent API cost
 - the reply that was posted
 
-A record is written as soon as a mention is queued and updated while the bot works, so mentions waiting their turn are listed and a reply in progress can be watched live. GitHub tokens and API keys are scrubbed before anything is written, and records older than `RUNS_KEEP_DAYS` (7 by default) are deleted.
+Each record also says whether the mention came from an admin or a contributor. A record is written as soon as a mention is queued and updated while the bot works, so mentions waiting their turn are listed and a reply in progress can be watched live. GitHub tokens and API keys are scrubbed before anything is written, and records older than `RUNS_KEEP_DAYS` (7 by default) are deleted.
 
 Models never return their raw reasoning, only a readable summary of it, so the thinking shown is that summary. Showing summaries costs no extra tokens: the model thinks, and is billed, the same either way.
 
-**Layout.** Records go under `$DASHBOARD_DIR/runs/<id>/`, with `meta.json`, `prompt.txt`, `attempt-<n>.jsonl` (`.txt` for `agy`) and `reply.md`. `runs/index.json` lists them all. The viewer in `web/` is copied into `$DASHBOARD_DIR` each time the agent starts. It's a static page with no server code and no third-party scripts, so any web server can host it.
+**Layout.** Records go under `$DASHBOARD_DIR/runs/<id>/`, with `meta.json`, `prompt.txt`, `attempt-<n>.jsonl` (`.txt` for `agy`) and `reply.md`. `runs/index.json` lists them all. The viewer in `web/` is copied into `$DASHBOARD_DIR` each time the agent starts. It's static pages with no third-party scripts, so any web server can host it. Only the settings page needs a server, the settings API (see [Who Can Ask the Bot](#who-can-ask-the-bot)).
 
 **Hosting it with nginx.** Point `DASHBOARD_DIR` at a folder nginx can read, such as `/srv/review-agent`, owned by the agent's user with group `www-data` and mode `2750`. Serve it with password protection, since records contain code and comments from private repositories. The unit file already lets the service write to `/srv/review-agent`.
 
@@ -193,6 +230,12 @@ server {
     auth_basic "Review agent";
     auth_basic_user_file /etc/nginx/review-agent.htpasswd;
     location /runs/ { expires -1; }
+    location /api/ {
+        proxy_pass http://127.0.0.1:9098;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Remote-User $remote_user;
+        client_max_body_size 64k;
+    }
 }
 ```
 
@@ -217,7 +260,7 @@ nginx reads the file on every request, so a new password works at once, with no 
 
 ## Choosing the Model from a Comment
 
-The default model is the first one in `CLAUDE_MODELS` (CLI) or `CLAUDE_API_MODELS` (API), and every Claude model runs at `xhigh` effort unless `CLAUDE_EFFORT` says otherwise. To use something else for one reply, add `--model` and/or `--effort` to your comment. Only comments from `ADMIN_USER` can do this; the options are ignored in anyone else's comment.
+The default model and effort for admins are set on the dashboard's settings page (at first, the first model in `CLAUDE_MODELS` at `xhigh`). To use something else for one reply, add `--model` and/or `--effort` to your comment. Only admins can do this; the options are ignored in a contributor's comment.
 
 Review with the most capable model:
 
@@ -261,7 +304,7 @@ Keep the default model, but think harder:
 | :--- | :---: | :--- | :--- |
 | `GITHUB_TOKEN` | **Yes** | — | GitHub Personal Access Token or OAuth token with `repo` and `notifications` scopes. |
 | `BOT_USER` | **Yes** | — | GitHub username of the bot account (e.g., `my-review-bot`). |
-| `ADMIN_USER` | **Yes** | — | GitHub username of the administrator who controls the bot. |
+| `ADMIN_USER` | **Yes** | — | GitHub username of the owner, who is always an admin. Add more admins on the settings page. |
 | `GIT_AUTHOR_NAME` | No | `$BOT_USER` | Git author name for automated commits. |
 | `GIT_AUTHOR_EMAIL` | No | `$BOT_USER@users.noreply.github.com` | Git author email address. |
 | `GIT_COMMITTER_NAME` | No | `$BOT_USER` | Git committer name for automated commits. |
@@ -269,9 +312,9 @@ Keep the default model, but think harder:
 | `WATCH_REPOS` | No | `""` | Space-separated list of `owner/repo` to actively poll for comments. |
 | `POLL_INTERVAL` | No | `15` | Polling loop interval in seconds. |
 | `AI_BACKENDS` | No | `claude-cli claude-api` | Backends tried in order: `claude-cli` (Claude Code CLI), `claude-api` (Claude API), `agy` (Antigravity CLI). |
-| `CLAUDE_MODELS` | No | `claude-opus-5-5 claude-sonnet-5-5` | Models for the Claude Code CLI. The first is the default; the rest are fallbacks. |
-| `CLAUDE_API_MODELS` | No | `$CLAUDE_MODELS` | Models for the Claude API, in the same form. |
-| `CLAUDE_EFFORT` | No | `xhigh` | Effort for both Claude backends: `low`, `medium`, `high`, `xhigh` or `max`. |
+| `CLAUDE_MODELS` | No | `claude-opus-5-5 claude-sonnet-5-5` | Models for the Claude Code CLI. The first is the default; the rest are fallbacks. The access settings' models replace it once they exist. |
+| `CLAUDE_API_MODELS` | No | `$CLAUDE_MODELS` | Models for the Claude API, in the same form, also replaced by the access settings. |
+| `CLAUDE_EFFORT` | No | `xhigh` | Effort for both Claude backends: `low`, `medium`, `high`, `xhigh` or `max`. Used for the admins' first access settings. |
 | `ANTHROPIC_API_KEY` | For `claude-api` | — | Claude API key. The CLI backend never uses it; it uses its own `claude` login. |
 | `CLAUDE_TIMEOUT` | No | `900` | Timeout in seconds for one Claude request. |
 | `CLAUDE_FLAGS` | No | `--dangerously-skip-permissions --no-session-persistence` | Extra flags passed to `claude -p`. |
@@ -287,7 +330,8 @@ Keep the default model, but think harder:
 | `BOT_FOOTER` | No | None | Extra text appended to responses, before the "Reviewed by" line. |
 | `DATA_DIR` | No | `./data` | Directory where state files are stored. |
 | `PROCESSED_FILE` | No | `./data/processed_comments.txt` | File tracking processed comment IDs. |
-| `UNLOCKED_THREADS_FILE` | No | `./data/unlocked_threads.txt` | File tracking unlocked issue/PR threads. |
+| `ACCESS_FILE` | No | `./data/access.json` | The access settings: admins, repos open to contributors, each group's models and the daily limit. Edited on the settings page. |
+| `CONTRIBUTOR_LOG` | No | `./data/contributor_reviews.log` | One line per contributor review, for the daily limit. |
 | `LOG_FILE` | No | `./review.log` | Destination file for operational logs. |
 
 ---
@@ -344,6 +388,13 @@ For production deployment with automatic reboot recovery:
    journalctl --user -u review-agent.service -f
    ```
 
+4. For the dashboard's settings page, install the settings API the same way (`./setup.sh` does this for you):
+   ```bash
+   cp systemd/review-agent-settings.service ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user enable --now review-agent-settings.service
+   ```
+
 ---
 
 ## Security Best Practices
@@ -354,7 +405,8 @@ For production deployment with automatic reboot recovery:
 2. **File Permissions**:
    - Always run `chmod 600 .env` to prevent other unprivileged users or services on the host from reading secrets.
 3. **What the CLI Backends Can Do**:
-   - `claude-cli` and `agy` run with `--dangerously-skip-permissions` as the service's user, so the agent can do anything that user can, including the SSH access that user has to other machines. Text in an unlocked thread reaches the model, so run the agent as a user with only the access it needs.
+   - For admins, `claude-cli` and `agy` run with `--dangerously-skip-permissions` as the service's user, so the agent can do anything that user can, including the SSH access that user has to other machines. Text in the thread, the PR and the code reaches the model, so only make people admins you trust with that, and run the agent as a user with only the access it needs.
+   - Contributor reviews run restricted: read-only file tools confined to the PR's checkout, and no GitHub token (see [Who Can Ask the Bot](#who-can-ask-the-bot)).
    - `claude-api` runs no tools: it only reads the prompt and writes a reply.
 4. **Secret Verification**:
    - Before pushing commits to GitHub, verify that no sensitive files are tracked:

@@ -10,8 +10,9 @@ set -uo pipefail
 AGENT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_ENV="$AGENT_DIR/.env"
 SERVICE="review-agent.service"
-UNIT_SRC="$AGENT_DIR/systemd/$SERVICE"
-UNIT_DST="$HOME/.config/systemd/user/$SERVICE"
+# The dashboard's settings API, deployed with the agent
+SETTINGS_SERVICE="review-agent-settings.service"
+UNIT_DIR="$HOME/.config/systemd/user"
 # The service's PATH, so the CLIs tested here are the ones it will run
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
@@ -114,6 +115,14 @@ ENV_FILE="$TMP_DIR/empty.env"
 # shellcheck disable=SC1091
 source "$AGENT_DIR/review-agent.sh"
 unset ENV_FILE
+
+# The admins' Claude models and effort are kept in the access settings (the dashboard's settings
+# page), so start from those. The models picked below are saved there too.
+IFS='|' read -r access_effort access_list <<< "$(access_models admin)"
+if [ -n "$access_list" ]; then
+  CLAUDE_MODELS="$access_list" CLAUDE_API_MODELS="$access_list"
+  [ -n "$access_effort" ] && CLAUDE_EFFORT="$access_effort"
+fi
 
 # ------------------------------------------------------------------------------
 # 3. Choose the backends
@@ -351,7 +360,7 @@ heading "Summary"
 printf '  Backends, in order: %s\n' "$backends"
 for line in "${RESULTS[@]}"; do printf '  %s\n' "$line"; done
 [[ " $backends " == *" claude-"* ]] &&
-  note "Claude effort: $CLAUDE_EFFORT. In a comment, you (@$ADMIN_USER) can add --model <name> and --effort <level> for one reply."
+  note "Claude effort: $CLAUDE_EFFORT. In a comment, an admin can add --model <name> and --effort <level> for one reply."
 for key in "${!PENDING[@]}"; do
   case "$key" in
     *TOKEN*|*KEY*) printf '  %s%s%s = (hidden, ending %s)\n' "$DIM" "$key" "$RST" "${PENDING[$key]: -4}" ;;
@@ -385,17 +394,39 @@ for key in "${!PENDING[@]}"; do set_env "$key" "${PENDING[$key]}"; done
 chmod 600 "$AGENT_ENV"
 ok "Saved .env (previous version in .env.bak)"
 
-if ! cmp -s "$UNIT_SRC" "$UNIT_DST"; then
-  mkdir -p "$(dirname "$UNIT_DST")"
-  cp "$UNIT_SRC" "$UNIT_DST"
-  systemctl --user daemon-reload
-  ok "Installed the updated unit file"
+# The admins' models, from the first Claude backend, go to the access settings, which the agent
+# reads them from. The agent writes the settings on its first start, from .env.
+admin_models=""
+for backend in $backends; do
+  case "$backend" in
+    claude-cli) admin_models="$CLAUDE_MODELS"; break ;;
+    claude-api) admin_models="$CLAUDE_API_MODELS"; break ;;
+  esac
+done
+if [ -n "$admin_models" ] && [ -s "$ACCESS_FILE" ]; then
+  jq --arg m "$admin_models" --arg e "$CLAUDE_EFFORT" \
+    '.models.admin = {models: ($m | split(" ") | map(select(. != ""))), effort: $e}' \
+    "$ACCESS_FILE" > "$ACCESS_FILE.tmp" && mv "$ACCESS_FILE.tmp" "$ACCESS_FILE" &&
+    ok "Saved the admins' models to the access settings"
 fi
 
+installed=false
+for unit in "$SERVICE" "$SETTINGS_SERVICE"; do
+  if ! cmp -s "$AGENT_DIR/systemd/$unit" "$UNIT_DIR/$unit"; then
+    mkdir -p "$UNIT_DIR"
+    cp "$AGENT_DIR/systemd/$unit" "$UNIT_DIR/$unit"
+    installed=true
+    ok "Installed the updated $unit"
+  fi
+done
+[ "$installed" = true ] && systemctl --user daemon-reload
+
 deployed=true
-systemctl --user enable --quiet "$SERVICE"
-systemctl --user restart "$SERVICE"
+systemctl --user enable --quiet "$SERVICE" "$SETTINGS_SERVICE"
+systemctl --user restart "$SERVICE" "$SETTINGS_SERVICE"
 sleep 3
+systemctl --user is-active --quiet "$SETTINGS_SERVICE" ||
+  warn "$SETTINGS_SERVICE didn't stay up, so the dashboard's settings page can't save: journalctl --user -u $SETTINGS_SERVICE"
 if systemctl --user is-active --quiet "$SERVICE"; then
   ok "$SERVICE is running"
   journalctl --user -u "$SERVICE" -n 3 --no-pager -o cat | sed 's/^/      /'

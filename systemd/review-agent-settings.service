@@ -1,0 +1,29 @@
+[Unit]
+Description=Settings API for the review agent's dashboard (who may ask the bot, and the models)
+After=network.target
+
+[Service]
+Type=simple
+# User services run as the invoking user; %h expands to that user's home directory.
+WorkingDirectory=%h/github-review-agent
+ExecStart=/usr/bin/env node %h/github-review-agent/settings-server.mjs
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Port on 127.0.0.1 that nginx proxies /api/ to
+Environment=SETTINGS_PORT=9098
+
+Restart=always
+RestartSec=5
+
+# It reads .env and writes only the access settings in data/. If DATA_DIR or ACCESS_FILE in
+# .env point elsewhere, add that directory here.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/github-review-agent/data
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
