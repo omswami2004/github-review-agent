@@ -279,14 +279,18 @@ redact() {
     -e 's/github_pat_[A-Za-z0-9_]{20,}/github_pat_[redacted]/g'
 }
 
-# Rebuild runs/index.json, newest first
+# Rebuild runs/index.json, newest first. The reply job and the poller both rebuild it, so a lock
+# keeps two rebuilds from overlapping and the last one always sees every record.
 runs_index() {
-  local runs="$DASHBOARD_DIR/runs" metas=("$DASHBOARD_DIR"/runs/*/meta.json)
-  if [ -e "${metas[0]}" ]; then
-    jq -s 'sort_by(.started_at // .queued_at) | reverse' "${metas[@]}" 2>/dev/null
-  else
-    echo '[]'
-  fi > "$runs/index.json.tmp" && mv "$runs/index.json.tmp" "$runs/index.json"
+  (
+    flock 9
+    local runs="$DASHBOARD_DIR/runs" metas=("$DASHBOARD_DIR"/runs/*/meta.json)
+    if [ -e "${metas[0]}" ]; then
+      jq -s 'sort_by(.started_at // .queued_at) | reverse' "${metas[@]}" 2>/dev/null
+    else
+      echo '[]'
+    fi > "$runs/index.json.tmp" && mv "$runs/index.json.tmp" "$runs/index.json"
+  ) 9> "$DATA_DIR/runs_index.lock"
 }
 
 # Delete records older than RUNS_KEEP_DAYS
@@ -487,16 +491,21 @@ run_claude_api() {
 
 # ------------------------------------------------------------------------------
 # Queue: mentions are answered one at a time, oldest first. QUEUE holds the
-# comment IDs in order and the Q_* arrays hold each one's details. A queued
-# mention's notification stays unread until it is answered, so a restart finds
-# it again.
+# comment IDs in order and the Q_* arrays hold each one's details. The reply
+# being written runs as a background job (REPLY_PID), so the loop keeps polling
+# and new mentions are queued while it runs. A mention's notification stays
+# unread until it is answered, so a restart finds it again.
 # ------------------------------------------------------------------------------
 QUEUE=()
 declare -A Q_REPO Q_NUM Q_USER Q_BODY Q_PATH Q_NOTIF Q_RUN Q_ROLE
+# The mention being answered: its comment ID, its notification and the reply job's PID
+CURRENT_ID="" CURRENT_NOTIF="" REPLY_PID=""
 
-# notif_queued NOTIFICATION_ID: whether a queued mention came from this notification
+# notif_queued NOTIFICATION_ID: whether a queued mention, or the one being answered, came from
+# this notification
 notif_queued() {
   local id
+  [ -n "$CURRENT_NOTIF" ] && [ "$CURRENT_NOTIF" = "$1" ] && return 0
   for id in "${QUEUE[@]}"; do
     [ "${Q_NOTIF[$id]}" = "$1" ] && return 0
   done
@@ -524,9 +533,13 @@ queue_comment() {
     return
   fi
 
-  # Already queued, perhaps found by the WATCH_REPOS scan before its notification
+  # Already queued or being answered, perhaps found by the WATCH_REPOS scan before its notification
   if [ -n "${Q_REPO[$comment_id]+queued}" ]; then
     [ -z "${Q_NOTIF[$comment_id]}" ] && Q_NOTIF[$comment_id]="$notif_id"
+    return
+  fi
+  if [ "$comment_id" = "$CURRENT_ID" ]; then
+    [ -z "$CURRENT_NOTIF" ] && CURRENT_NOTIF="$notif_id"
     return
   fi
 
@@ -613,18 +626,31 @@ queue_comment() {
   log "Queued mention from @$comment_user in $repo #$item_num (Comment ID: $comment_id); ${#QUEUE[@]} in the queue"
 }
 
-# answer_next: answer the mention at the head of the queue, then mark its notification read unless
-# another queued mention came from it
+# answer_next: start answering the mention at the head of the queue, in a background job
 answer_next() {
   local id="${QUEUE[0]}"
   local repo="${Q_REPO[$id]}" item_num="${Q_NUM[$id]}" user="${Q_USER[$id]}" body="${Q_BODY[$id]}"
-  local api_path="${Q_PATH[$id]}" notif_id="${Q_NOTIF[$id]}" role="${Q_ROLE[$id]}"
-  RUN_DIR="${Q_RUN[$id]}"
+  local api_path="${Q_PATH[$id]}" role="${Q_ROLE[$id]}" run_dir="${Q_RUN[$id]}"
+  CURRENT_ID="$id"
+  CURRENT_NOTIF="${Q_NOTIF[$id]}"
   QUEUE=("${QUEUE[@]:1}")
   unset "Q_REPO[$id]" "Q_NUM[$id]" "Q_USER[$id]" "Q_BODY[$id]" "Q_PATH[$id]" "Q_NOTIF[$id]" "Q_RUN[$id]" "Q_ROLE[$id]"
 
-  answer_comment "$repo" "$item_num" "$id" "$user" "$body" "$api_path" "$role"
+  ( RUN_DIR="$run_dir"; answer_comment "$repo" "$item_num" "$id" "$user" "$body" "$api_path" "$role" ) &
+  REPLY_PID=$!
+}
 
+# reply_running: whether the reply job is still running
+reply_running() {
+  [ -n "$REPLY_PID" ] && kill -0 "$REPLY_PID" 2>/dev/null
+}
+
+# reply_done: after the reply job ends, mark its notification read unless a queued mention came
+# from it too
+reply_done() {
+  local notif_id="$CURRENT_NOTIF"
+  wait "$REPLY_PID" 2>/dev/null
+  REPLY_PID="" CURRENT_ID="" CURRENT_NOTIF=""
   if [ -n "$notif_id" ] && ! notif_queued "$notif_id"; then
     gh api --method PATCH "notifications/threads/$notif_id" >/dev/null 2>&1
   fi
@@ -1133,8 +1159,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   RUN_DIR=""
   runs_prune
 
-  # Polling loop. After each reply it polls again before answering the next queued mention, so
-  # mentions made in the meantime show up as queued on the dashboard.
+  # Polling loop. It keeps polling while a reply is written, so mentions made in the meantime get
+  # their 👀 and show up as queued on the dashboard within one poll. The wait between polls ends
+  # early when the reply finishes, so the next queued mention starts straight away.
   while true; do
     poll_notifications
 
@@ -1143,10 +1170,16 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       poll_repo_pull_comments "$r"
     done
 
-    if [ ${#QUEUE[@]} -gt 0 ]; then
-      answer_next
-    else
-      sleep "$POLL_INTERVAL"
+    if [ -n "$REPLY_PID" ] && ! reply_running; then
+      reply_done
     fi
+    if [ -z "$REPLY_PID" ] && [ ${#QUEUE[@]} -gt 0 ]; then
+      answer_next
+    fi
+
+    sleep "$POLL_INTERVAL" &
+    sleep_pid=$!
+    wait -n "$sleep_pid" ${REPLY_PID:+"$REPLY_PID"} 2>/dev/null
+    { kill "$sleep_pid" && wait "$sleep_pid"; } 2>/dev/null
   done
 fi

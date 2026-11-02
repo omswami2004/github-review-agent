@@ -159,11 +159,11 @@ Set `PR_CHECKOUT=false` to review from the diff alone.
 
 ## How Mentions Are Queued
 
-The bot answers one mention at a time, oldest first. Each poll finds every new mention, queues the ones it should answer and reacts to each with 👀 straight away, so you know it was seen even when other replies are ahead of it. After each reply the bot polls again before taking the next mention, so anything posted in the meantime joins the end of the queue.
+The bot answers one mention at a time, oldest first. Each poll finds every new mention, queues the ones it should answer and reacts to each with 👀 straight away, so you know it was seen even when other replies are ahead of it. The bot keeps polling while it writes a reply, so a mention posted in the meantime gets its 👀 and joins the end of the queue within one poll (`POLL_INTERVAL`, 15 seconds by default), and the next mention is started as soon as the reply before it is posted.
 
 On the [activity dashboard](#activity-dashboard), mentions waiting their turn are listed at the top as **Queued**, with their place in line ("next in line", "2nd in line"), and the header shows how many are waiting. A queued mention becomes a normal running record when its turn comes.
 
-A mention's notification stays unread until its reply is posted. If the agent restarts with mentions still queued, it drops their queued records and finds the mentions again on its first poll, so none are lost.
+A mention's notification stays unread until its reply is posted, and until every other queued mention from the same pull request or issue is answered too. If the agent restarts with mentions still queued, it drops their queued records and finds the mentions again on its first poll, so none are lost. A reply cut off by the restart is marked interrupted and its mention is answered again.
 
 ---
 
