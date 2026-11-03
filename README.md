@@ -2,7 +2,7 @@
 
 An autonomous GitHub review and coding assistant agent powered by Claude (through the Claude Code CLI or the Claude API) or Google Antigravity CLI (`agy`). The bot continuously monitors GitHub notifications and repository comments, reviews pull request diffs, answers issues, executes code modifications, and responds directly on GitHub threads.
 
-**Quick start:** run `./setup.sh`. It stops the service, lets you pick the backend and the default model, tests them on the spot, and redeploys the service when you type `done`. To use a different model for one reply, put `--model` in your comment (see [Choosing the model from a comment](#choosing-the-model-from-a-comment)). Who may ask the bot, and the models each of them gets, are set on the dashboard's settings page (see [Who Can Ask the Bot](#who-can-ask-the-bot)).
+**Quick start:** run `./setup.sh`. It stops the service, lets you pick the backend and the default model, tests them on the spot, and redeploys the service when you type `done`. To use a different method or model for one reply, put `--method` or `--model` in your comment (see [Choosing the method and model from a comment](#choosing-the-method-and-model-from-a-comment)). Who may ask the bot, and the method and models each of them gets, are set on the dashboard's settings page (see [Who Can Ask the Bot](#who-can-ask-the-bot)).
 
 ---
 
@@ -33,8 +33,10 @@ flowchart TD
 ## Features
 
 - **Automated Code Reviews & Assistance**: Uses Claude or Antigravity CLI (`agy`) to inspect diffs, test builds, review pull requests, and explain complex code logic.
-- **Backend & Model Fallback**: Tries each backend in `AI_BACKENDS`, and each of its models, until one replies, so a used-up plan or API quota doesn't stop the bot.
-- **Per-Comment Model Choice**: Admins can pick the model and effort for a single reply from the comment itself.
+- **Choice of Method**: Each reply is written with the Claude Code CLI, the Claude API (an API key) or the Antigravity CLI, chosen for admins and for contributors on the settings page.
+- **Backend & Model Fallback**: Tries each backend, and each of its models, until one replies, so a used-up plan or API quota doesn't stop the bot.
+- **Per-Comment Choice**: Admins can pick the method, model and effort for a single reply from the comment itself.
+- **Reviews That Build on the Thread**: The PR's description, commits, reviews and comments so far go into every prompt. A review lists only what the author should change, and doesn't repeat a point the author already fixed or answered (see [What a Review Contains](#what-a-review-contains)).
 - **Code Checkout**: Each reply gets a throwaway checkout of the repository at the PR's head commit, so the CLI backends can read the changed files in full, their callers and the tests, not just the diff.
 - **CI Instead of Local Builds**: The bot reads the PR's CI results rather than building or testing locally, and never uses or installs Nix.
 - **Immediate Acknowledgment**: Reacts to mentions with the `eyes` (👀) reaction as soon as they are queued, so authors know their request was received.
@@ -157,6 +159,35 @@ Set `PR_CHECKOUT=false` to review from the diff alone.
 
 ---
 
+## What a Review Contains
+
+A review is only the changes the author should make:
+
+```text
+**Verdict:** Request changes
+
+### Must fix
+
+1. **`src/file.rs`, lines 40-52: short title**
+   What goes wrong and when, then the fix, with a code block when it is concrete.
+
+### Suggestions
+
+1. ...
+```
+
+There is no summary or scope of the PR, no risk rating, no account of what the model checked or found to be correct, and no recap of earlier rounds. A section with nothing in it is left out, so a PR with nothing to change gets the Verdict line alone.
+
+**Earlier discussion.** Every prompt includes what was said on the PR or issue before the mention, oldest first: the description, the commits, every comment, every review and every inline review comment (with its file, line, and whom it replies to), with the bot's own earlier replies marked. Comments from bot accounts such as CI are shortened to 1,500 characters and others to 6,000, and when the whole is longer than `DISCUSSION_MAX_CHARS` (60,000 by default) the oldest entries are left out. The model is told:
+
+- not to raise a point already made, by itself or anyone else, if the author fixed it, gave a reasonable justification, or a maintainer decided against it;
+- to raise it again only if it is important (a bug, security issue, data loss or breaking change) and still not fixed, or if the author's justification doesn't hold up, and then to say in one sentence why;
+- on a PR it reviewed before, to review what changed since, and not to bring up new minor suggestions about code it already reviewed.
+
+This works for every method, including contributor reviews and the Claude API, neither of which can read GitHub themselves.
+
+---
+
 ## How Mentions Are Queued
 
 The bot answers one mention at a time, oldest first. Each poll finds every new mention, queues the ones it should answer and reacts to each with 👀 straight away, so you know it was seen even when other replies are ahead of it. The bot keeps polling while it writes a reply, so a mention posted in the meantime gets its 👀 and joins the end of the queue within one poll (`POLL_INTERVAL`, 15 seconds by default), and the next mention is started as soon as the reply before it is posted.
@@ -177,9 +208,20 @@ The bot answers two kinds of people, set on the dashboard's **Settings** page. E
 | Where | Any repo | Only those repos, and only on pull requests |
 | What | Anything: reviews, answers, code changes, pull requests | A review of the pull request, whatever the comment asks |
 | Tools | All of them (see [How the Bot Sees the Code](#how-the-bot-sees-the-code)) | Read and search the PR's checkout, nothing else |
+| Method | Claude Code CLI, Claude API or `agy`, or `--method` in the comment | Claude Code CLI or Claude API |
 | Models | The admins' default and fallback, or `--model` / `--effort` in the comment | The contributors' default and fallback |
 
-People are added by GitHub username, with or without the `@`, and several at once separated by spaces or commas. The page also sets each group's Claude models and effort, and how many reviews one contributor can get in 24 hours (0 for no limit). Saved changes apply from the next mention, with no restart.
+People are added by GitHub username, with or without the `@`, and several at once separated by spaces or commas. The page also sets how many reviews one contributor can get in 24 hours (0 for no limit). Saved changes apply from the next mention, with no restart.
+
+**Method and models.** For each group, the page sets the method that writes the reply and a fallback method, tried when the first one fails:
+
+| Method | Uses | Can |
+| :--- | :--- | :--- |
+| Claude Code CLI (`claude-cli`) | This machine's `claude` login | Read the checkout and, for admins, run commands, `gh` and open PRs |
+| Claude API (`claude-api`) | `ANTHROPIC_API_KEY` in `.env` | Answer from the prompt only: the comment, the diff, the CI summary and the earlier discussion |
+| Antigravity CLI (`agy`) | `agy`'s own login, and `AGY_MODELS` from `.env` | Like the Claude Code CLI; admins only |
+
+The page warns when a group uses the Claude API and no key is set; add one with `./setup.sh`. The default model, a fallback model and the effort apply to the Claude methods. Settings saved before methods could be chosen have none, and then `AI_BACKENDS` from `.env` is used. `./setup.sh` saves the backends you pick there as the admins' method.
 
 **What a contributor gets.** On a pull request, the bot writes a review in the usual format, using the comment only as a hint about what to focus on. If the comment asks for something else, the bot doesn't do it, and says that it only reviews pull requests for contributors. On an issue, it replies that it only reviews pull requests. Past the daily limit, it replies that they should ask again later. These replies don't use a model.
 
@@ -187,7 +229,7 @@ People are added by GitHub username, with or without the `@`, and several at onc
 
 - `claude` runs with `--restricted --tools Read,Grep,Glob`. It can read and search files but has no tool that runs commands or fetches URLs, file reads can't leave the PR's checkout (symlinks included), and no settings file is loaded. With no checkout, it runs in an empty directory.
 - It gets no GitHub token, so it can't post, push or open anything. The agent posts the review.
-- `agy` can't be restricted this way, so it never answers a contributor. `claude-api` has no tools at all.
+- `agy` can't be restricted this way, so it can't be chosen for contributors, and it never answers one. `claude-api` has no tools at all.
 
 **Where the settings live.** `data/access.json` (`ACCESS_FILE`). The agent writes it on its first start, with `ADMIN_USER` as the only admin, the admins' models from `CLAUDE_MODELS` and `CLAUDE_EFFORT`, and no repo open to contributors. After that, the file's models are the ones used, for both Claude backends; `./setup.sh` writes the admin models you pick there too. The page saves the file through a small settings API, `settings-server.mjs` (Node, no dependencies), which checks every change before it writes it. It runs as `review-agent-settings.service` on `127.0.0.1:9098`, and `./setup.sh` installs and restarts it along with the agent. To serve it on the dashboard, add this to the dashboard's nginx `server` block, inside the password-protected part (see [Activity Dashboard](#activity-dashboard)):
 
@@ -258,9 +300,21 @@ nginx reads the file on every request, so a new password works at once, with no 
 
 ---
 
-## Choosing the Model from a Comment
+## Choosing the Method and Model from a Comment
 
-The default model and effort for admins are set on the dashboard's settings page (at first, the first model in `CLAUDE_MODELS` at `xhigh`). To use something else for one reply, add `--model` and/or `--effort` to your comment. Only admins can do this; the options are ignored in a contributor's comment.
+The method, default model and effort for admins are set on the dashboard's settings page (at first, the backends in `AI_BACKENDS` and the first model in `CLAUDE_MODELS` at `xhigh`). To use something else for one reply, add `--method`, `--model` and/or `--effort` to your comment. Only admins can do this; the options are ignored in a contributor's comment.
+
+Review with the Claude API instead of the CLI:
+
+```text
+@your-bot-username review this PR --method api
+```
+
+Use the Antigravity CLI with one of its models:
+
+```text
+@your-bot-username review --method agy --model gemini-3.1-pro-high
+```
 
 Review with the most capable model:
 
@@ -288,13 +342,14 @@ Keep the default model, but think harder:
 
 | Option | Values |
 | :--- | :--- |
+| `--method` | `cli` (Claude Code CLI), `api` (Claude API) or `agy` (Antigravity CLI); `claude-cli`, `claude-api` and `antigravity` also work. |
 | `--model` | `opus` (`claude-opus-5-5`), `sonnet` (`claude-sonnet-5-5`), `haiku` (`claude-haiku-5-5`), `fable` (`claude-fable-5-1`), or any full model ID. `--model=<name>` also works. |
 | `--effort` | `low`, `medium`, `high`, `xhigh` or `max`. |
 
-- The model you name is tried first. If it fails, the configured models are used as fallbacks, so you still get a reply.
+- The method and model you name are tried first. If they fail, the configured ones are used as fallbacks, so you still get a reply. An unknown method is ignored.
 - The options are removed from the comment before it reaches the model.
-- The "Reviewed by" line at the bottom of the reply names the model that actually answered.
-- `--model` applies to the Claude backends. `agy` keeps its own `AGY_MODELS`, since its model names are different.
+- The "Reviewed by" line at the bottom of the reply names the model that actually answered, and the dashboard shows the method.
+- `--model` applies to the Claude methods, and to `agy` only together with `--method agy`, since `agy`'s model names are different. Otherwise `agy` uses `AGY_MODELS`.
 
 ---
 
@@ -311,7 +366,8 @@ Keep the default model, but think harder:
 | `GIT_COMMITTER_EMAIL` | No | `$BOT_USER@users.noreply.github.com` | Git committer email address. |
 | `WATCH_REPOS` | No | `""` | Space-separated list of `owner/repo` to actively poll for comments. |
 | `POLL_INTERVAL` | No | `15` | Polling loop interval in seconds. |
-| `AI_BACKENDS` | No | `claude-cli claude-api` | Backends tried in order: `claude-cli` (Claude Code CLI), `claude-api` (Claude API), `agy` (Antigravity CLI). |
+| `AI_BACKENDS` | No | `claude-cli claude-api` | Backends tried in order: `claude-cli` (Claude Code CLI), `claude-api` (Claude API), `agy` (Antigravity CLI). The settings page's method for each group replaces it once set. |
+| `DISCUSSION_MAX_CHARS` | No | `60000` | Most characters of earlier discussion put in the prompt; the oldest entries are left out beyond it. |
 | `CLAUDE_MODELS` | No | `claude-opus-5-5 claude-sonnet-5-5` | Models for the Claude Code CLI. The first is the default; the rest are fallbacks. The access settings' models replace it once they exist. |
 | `CLAUDE_API_MODELS` | No | `$CLAUDE_MODELS` | Models for the Claude API, in the same form, also replaced by the access settings. |
 | `CLAUDE_EFFORT` | No | `xhigh` | Effort for both Claude backends: `low`, `medium`, `high`, `xhigh` or `max`. Used for the admins' first access settings. |
@@ -330,7 +386,7 @@ Keep the default model, but think harder:
 | `BOT_FOOTER` | No | None | Extra text appended to responses, before the "Reviewed by" line. |
 | `DATA_DIR` | No | `./data` | Directory where state files are stored. |
 | `PROCESSED_FILE` | No | `./data/processed_comments.txt` | File tracking processed comment IDs. |
-| `ACCESS_FILE` | No | `./data/access.json` | The access settings: admins, repos open to contributors, each group's models and the daily limit. Edited on the settings page. |
+| `ACCESS_FILE` | No | `./data/access.json` | The access settings: admins, repos open to contributors, each group's method and models, and the daily limit. Edited on the settings page. |
 | `CONTRIBUTOR_LOG` | No | `./data/contributor_reviews.log` | One line per contributor review, for the daily limit. |
 | `LOG_FILE` | No | `./review.log` | Destination file for operational logs. |
 

@@ -116,19 +116,20 @@ ENV_FILE="$TMP_DIR/empty.env"
 source "$AGENT_DIR/review-agent.sh"
 unset ENV_FILE
 
-# The admins' Claude models and effort are kept in the access settings (the dashboard's settings
-# page), so start from those. The models picked below are saved there too.
-IFS='|' read -r access_effort access_list <<< "$(access_models admin)"
+# The admins' method (backends), Claude models and effort are kept in the access settings (the
+# dashboard's settings page), so start from those. The ones picked below are saved there too.
+IFS='|' read -r access_effort access_list access_backends <<< "$(access_models admin)"
 if [ -n "$access_list" ]; then
   CLAUDE_MODELS="$access_list" CLAUDE_API_MODELS="$access_list"
   [ -n "$access_effort" ] && CLAUDE_EFFORT="$access_effort"
 fi
+[ -n "$access_backends" ] && AI_BACKENDS="$access_backends"
 
 # ------------------------------------------------------------------------------
 # 3. Choose the backends
 # ------------------------------------------------------------------------------
 heading "AI backend"
-note "Current setting: AI_BACKENDS=\"$AI_BACKENDS\""
+note "Current setting for admins: \"$AI_BACKENDS\". Contributors' method is set on the dashboard's settings page."
 cat <<EOF
   1) Claude Code CLI      this machine's Claude login; can read code, run gh and open PRs
   2) Claude API           an API key; answers from the comment and the PR diff only
@@ -360,7 +361,7 @@ heading "Summary"
 printf '  Backends, in order: %s\n' "$backends"
 for line in "${RESULTS[@]}"; do printf '  %s\n' "$line"; done
 [[ " $backends " == *" claude-"* ]] &&
-  note "Claude effort: $CLAUDE_EFFORT. In a comment, an admin can add --model <name> and --effort <level> for one reply."
+  note "Claude effort: $CLAUDE_EFFORT. In a comment, an admin can add --method <cli|api|agy>, --model <name> and --effort <level> for one reply."
 for key in "${!PENDING[@]}"; do
   case "$key" in
     *TOKEN*|*KEY*) printf '  %s%s%s = (hidden, ending %s)\n' "$DIM" "$key" "$RST" "${PENDING[$key]: -4}" ;;
@@ -394,8 +395,8 @@ for key in "${!PENDING[@]}"; do set_env "$key" "${PENDING[$key]}"; done
 chmod 600 "$AGENT_ENV"
 ok "Saved .env (previous version in .env.bak)"
 
-# The admins' models, from the first Claude backend, go to the access settings, which the agent
-# reads them from. The agent writes the settings on its first start, from .env.
+# The admins' backends, and their models from the first Claude backend, go to the access settings,
+# which the agent reads them from. The agent writes the settings on its first start, from .env.
 admin_models=""
 for backend in $backends; do
   case "$backend" in
@@ -403,11 +404,13 @@ for backend in $backends; do
     claude-api) admin_models="$CLAUDE_API_MODELS"; break ;;
   esac
 done
-if [ -n "$admin_models" ] && [ -s "$ACCESS_FILE" ]; then
-  jq --arg m "$admin_models" --arg e "$CLAUDE_EFFORT" \
-    '.models.admin = {models: ($m | split(" ") | map(select(. != ""))), effort: $e}' \
+if [ -s "$ACCESS_FILE" ]; then
+  jq --arg m "$admin_models" --arg e "$CLAUDE_EFFORT" --arg b "$backends" '
+    def words: split(" ") | map(select(. != ""));
+    .models.admin.backends = ($b | words) |
+    if $m != "" then .models.admin += {models: ($m | words), effort: $e} else . end' \
     "$ACCESS_FILE" > "$ACCESS_FILE.tmp" && mv "$ACCESS_FILE.tmp" "$ACCESS_FILE" &&
-    ok "Saved the admins' models to the access settings"
+    ok "Saved the admins' method${admin_models:+ and models} to the access settings"
 fi
 
 installed=false

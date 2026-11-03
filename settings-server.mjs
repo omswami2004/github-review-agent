@@ -1,7 +1,8 @@
 // Settings API for the dashboard's settings page. nginx serves it at /api/ behind the dashboard's
 // password. It reads and writes the access settings (data/access.json), which the agent reads
 // again for every mention, so a saved change applies from the next one.
-//   GET /api/settings   the settings, and what the page shows from .env (bot, owner, backends)
+//   GET /api/settings   the settings, and what the page shows from .env (bot, owner, backends,
+//                       agy's models, and whether an API key is set)
 //   PUT /api/settings   replace the settings: {settings, base}, where base is the updated_at the
 //                       page loaded, so a change saved elsewhere in the meantime isn't overwritten
 // Run with node (no dependencies). It listens on 127.0.0.1 only.
@@ -18,9 +19,14 @@ const USER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/;
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+// The methods a reply can be written with. agy can't be limited to reading files, so it never
+// answers a contributor.
+const BACKENDS = ["claude-cli", "claude-api", "agy"];
+const CONTRIBUTOR_BACKENDS = ["claude-cli", "claude-api"];
 
 // The few .env settings this needs, read on every request so a change to .env shows up. Values
-// that use shell expansion are skipped, and their defaults used instead.
+// that use shell expansion are skipped, and their defaults used instead. Of ANTHROPIC_API_KEY,
+// only whether it is set is kept.
 async function agentEnv() {
   const env = {};
   let text = "";
@@ -30,10 +36,11 @@ async function agentEnv() {
     // No .env: the defaults below
   }
   for (const line of text.split("\n")) {
-    const match = /^\s*(?:export\s+)?(BOT_USER|ADMIN_USER|AI_BACKENDS|DATA_DIR|ACCESS_FILE)=(.*)$/.exec(line);
+    const match = /^\s*(?:export\s+)?(BOT_USER|ADMIN_USER|AI_BACKENDS|AGY_MODELS|DATA_DIR|ACCESS_FILE|ANTHROPIC_API_KEY)=(.*)$/.exec(line);
     if (!match) continue;
     const value = match[2].trim().replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
-    if (!value.includes("$")) env[match[1]] = value;
+    if (match[1] === "ANTHROPIC_API_KEY") env.apiKey = value !== "";
+    else if (!value.includes("$")) env[match[1]] = value;
   }
   // Relative paths are relative to the agent's directory, its working directory
   const dataDir = resolve(AGENT_DIR, env.DATA_DIR || "data");
@@ -41,6 +48,8 @@ async function agentEnv() {
     bot: env.BOT_USER || "",
     owner: env.ADMIN_USER || "",
     backends: (env.AI_BACKENDS || "claude-cli claude-api").split(/\s+/).filter(Boolean),
+    agyModels: (env.AGY_MODELS || "gemini-3.8-flash-high claude-sonnet-5-5-high gemini-3.1-pro-high").split(/\s+/).filter(Boolean),
+    apiKey: Boolean(env.apiKey),
     accessFile: resolve(AGENT_DIR, env.ACCESS_FILE || join(dataDir, "access.json")),
   };
 }
@@ -71,7 +80,20 @@ function models(entry, role) {
     if (!MODEL_RE.test(model)) throw new BadRequest(`"${model}" isn't a model ID`);
   }
   if (!EFFORTS.includes(entry.effort)) throw new BadRequest(`Effort for ${role}s must be one of ${EFFORTS.join(", ")}`);
-  return { models: list, effort: entry.effort };
+  const result = { models: list, effort: entry.effort };
+  // The methods, a default and fallbacks. Without them the agent uses AI_BACKENDS from .env.
+  if (entry.backends !== undefined) {
+    const allowed = role === "contributor" ? CONTRIBUTOR_BACKENDS : BACKENDS;
+    const backends = Array.isArray(entry.backends) ? [...new Set(entry.backends.map(String))] : [];
+    if (backends.length < 1 || backends.length > allowed.length) throw new BadRequest(`${role}s need a method`);
+    for (const backend of backends) {
+      if (!allowed.includes(backend)) {
+        throw new BadRequest(backend === "agy" ? "Contributors can't use agy" : `"${backend}" isn't a method`);
+      }
+    }
+    result.backends = backends;
+  }
+  return result;
 }
 
 // The settings to save, checked and tidied, or a BadRequest saying what is wrong
@@ -147,7 +169,7 @@ async function handle(req, res) {
   const path = new URL(req.url, "http://localhost").pathname;
   if (path !== "/api/settings") return send(res, 404, { error: "Not found" });
   const env = await agentEnv();
-  const info = { bot: env.bot, owner: env.owner, backends: env.backends };
+  const info = { bot: env.bot, owner: env.owner, backends: env.backends, agy_models: env.agyModels, api_key: env.apiKey };
 
   if (req.method === "GET") {
     const settings = await readSettings(env.accessFile);

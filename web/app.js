@@ -466,6 +466,7 @@ async function renderDetail(force = false) {
     fact("Asked as", ROLE_LABELS[run.role] || ""),
     fact("Type", run.type),
     fact("Answered by", run.answered_by ? `${modelName(run.answered_by.model)} (${run.answered_by.backend})` : ""),
+    fact("Requested method", run.requested_method),
     fact("Requested model", run.requested_model ? modelName(run.requested_model) : ""),
     fact("Effort", run.effort),
     fact("Backends", run.backends),

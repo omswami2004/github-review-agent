@@ -1,4 +1,4 @@
-// Settings page: who may mention the bot and which models they get. Loads and saves the access
+// Settings page: who may mention the bot, and the method and models they get. Loads and saves the access
 // settings through the agent's settings API (settings-server.mjs) at api/settings. The agent reads
 // them again for every mention, so a saved change applies from the next one.
 "use strict";
@@ -7,6 +7,14 @@ const API = "api/settings";
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // Offered in the model lists, along with any other model the settings already use
 const KNOWN_MODELS = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+// The methods a reply can be written with. agy can't be limited to reading files, so contributors
+// don't get it.
+const METHODS = [
+  ["claude-cli", "Claude Code CLI"],
+  ["claude-api", "Claude API (API key)"],
+  ["agy", "Antigravity CLI (agy)"],
+];
+const ROLE_METHODS = { admin: ["claude-cli", "claude-api", "agy"], contributor: ["claude-cli", "claude-api"] };
 const USER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/;
 
@@ -28,11 +36,20 @@ const state = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-// The parts of the saved settings the form edits
-function editable(settings) {
+// The parts of the saved settings the form edits. Settings saved before methods could be chosen
+// have none, and the agent then uses AI_BACKENDS from .env, so the form starts from that.
+function editable(settings, info = {}) {
   const models = (role) => {
-    const list = settings.models?.[role]?.models || [];
-    return { models: list.length ? [...list] : [KNOWN_MODELS[2]], effort: settings.models?.[role]?.effort || "high" };
+    const entry = settings.models?.[role] || {};
+    const list = entry.models || [];
+    const allowed = ROLE_METHODS[role];
+    let backends = (entry.backends || info.backends || []).filter((backend) => allowed.includes(backend));
+    if (!backends.length) backends = ["claude-cli"];
+    return {
+      models: list.length ? [...list] : [KNOWN_MODELS[2]],
+      effort: entry.effort || "high",
+      backends,
+    };
   };
   return {
     admins: [...(settings.admins || [])],
@@ -136,7 +153,7 @@ function adminsCard() {
   const owner = state.info.owner;
   return card("Admins",
     ["Can ask for anything in any repo: reviews, answers, code changes and pull requests. " +
-      "They can also pick the model for one reply with ", code("--model"), " and ", code("--effort"), " in their comment."],
+      "They can also pick the method and model for one reply with ", code("--method"), ", ", code("--model"), " and ", code("--effort"), " in their comment."],
     userList(state.settings.admins, "admins", {
       fixed: owner ? [{ name: owner, note: "owner", title: "ADMIN_USER in .env is always an admin" }] : [],
       placeholder: "Add admins by GitHub username (the @ is optional)",
@@ -257,15 +274,27 @@ function select(label, options, value, onchange) {
 function modelRow(role, label, note) {
   const entry = state.settings.models[role];
   const [model = KNOWN_MODELS[1], fallback = ""] = entry.models;
+  const [method = "claude-cli", fallbackMethod = ""] = entry.backends;
   const options = modelOptions();
+  const methods = METHODS.filter(([id]) => ROLE_METHODS[role].includes(id));
   return el("div", { class: "model-row" },
     el("div", { class: "model-role" }, el("strong", { text: label }), el("div", { class: "muted small" }, note)),
-    el("label", { class: "model-field" }, el("span", { class: "muted small", text: "Default model" }),
+    el("label", { class: "model-field" }, el("span", { class: "muted small", text: "Method" }),
+      select(`${label}: method`, methods, method, (value) => {
+        entry.backends = [value, ...(fallbackMethod && fallbackMethod !== value ? [fallbackMethod] : [])];
+        render();
+      })),
+    el("label", { class: "model-field" }, el("span", { class: "muted small", text: "Fallback method" }),
+      select(`${label}: fallback method`, [["", "None"], ...methods.filter(([id]) => id !== method)], fallbackMethod, (value) => {
+        entry.backends = [method, ...(value ? [value] : [])];
+        render();
+      })),
+    el("label", { class: "model-field new-line" }, el("span", { class: "muted small", text: "Default model" }),
       select(`${label}: default model`, options.map((id) => [id, modelName(id)]), model, (value) => {
         entry.models = [value, ...(fallback && fallback !== value ? [fallback] : [])];
         render();
       })),
-    el("label", { class: "model-field" }, el("span", { class: "muted small", text: "Fallback" }),
+    el("label", { class: "model-field" }, el("span", { class: "muted small", text: "Fallback model" }),
       select(`${label}: fallback model`, [["", "None"], ...options.filter((id) => id !== model).map((id) => [id, modelName(id)])], fallback, (value) => {
         entry.models = [model, ...(value ? [value] : [])];
         render();
@@ -278,28 +307,31 @@ function modelRow(role, label, note) {
 }
 
 function modelsCard() {
-  const backends = state.info.backends || [];
-  return card("Models",
-    "Used by the Claude backends. The fallback is tried when the default model fails, for example when its usage limit is reached.",
+  const used = ["admin", "contributor"].flatMap((role) => state.settings.models[role].backends);
+  const agyModels = state.info.agy_models || [];
+  return card("Method and models",
+    ["The method writes the reply: the Claude Code CLI with this machine's Claude login, which can read the code and run commands; " +
+      "the Claude API with the API key, which answers from the diff and the discussion in the prompt; or the Antigravity CLI. " +
+      "The fallback method, and the fallback model, are tried when the first one fails, for example when its usage limit is reached. " +
+      "The models and effort are for the Claude methods."],
     el("div", { class: "models" },
-      modelRow("admin", "Admins", [code("--model"), " and ", code("--effort"), " in a comment override these for one reply."]),
-      modelRow("contributor", "Contributors", "Contributors can't choose another model.")),
-    backends.includes("agy")
-      ? el("p", { class: "muted small" }, code("agy"), " uses ", code("AGY_MODELS"), " from .env, and only answers admins.")
+      modelRow("admin", "Admins", [code("--method"), ", ", code("--model"), " and ", code("--effort"), " in a comment override these for one reply."]),
+      modelRow("contributor", "Contributors", "Contributors can't choose another method or model, and can't use agy.")),
+    used.includes("claude-api") && state.info.api_key === false
+      ? el("p", { class: "field-warning" }, "No API key is set (", code("ANTHROPIC_API_KEY"), " in .env), so the Claude API method will fail. Run ", code("./setup.sh"), " on the server to add one.")
+      : null,
+    used.includes("agy")
+      ? el("p", { class: "muted small" }, code("agy"), " uses ", code("AGY_MODELS"), " from .env",
+          agyModels.length ? [" (", agyModels.join(", "), ")"] : "", ", tried in order, and only answers admins.")
       : null);
 }
 
 function intro() {
-  const backends = state.info.backends || [];
   const bot = state.info.bot ? `@${state.info.bot}` : "the bot";
-  const claude = backends.some((backend) => backend.startsWith("claude-"));
   return el("div", { class: "settings-intro" },
     el("h2", { text: "Who can ask the bot" }),
     el("p", { class: "muted" },
-      `Who can mention ${bot}, and what they get. Saved changes apply from the next mention, with no restart. Anyone not covered here is ignored.`),
-    claude
-      ? null
-      : el("p", { class: "field-warning", text: `AI_BACKENDS in .env is "${backends.join(" ")}", with no Claude backend, so contributors get no reviews. Run ./setup.sh to add one.` }));
+      `Who can mention ${bot}, and what they get. Saved changes apply from the next mention, with no restart. Anyone not covered here is ignored.`));
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +385,7 @@ function renderSaveBar() {
 }
 
 function useSettings(settings, info) {
-  state.settings = editable(settings);
+  state.settings = editable(settings, info);
   state.saved = JSON.stringify(state.settings);
   state.base = settings.updated_at || null;
   state.meta = { updated_at: settings.updated_at, updated_by: settings.updated_by };

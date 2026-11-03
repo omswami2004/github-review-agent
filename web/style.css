@@ -399,6 +399,7 @@ pre.output.error { color: var(--bad); }
 .limit + p { margin: 4px 0 0; }
 
 .models { display: grid; gap: 12px; }
+/* Each role: its name on the left, the methods on the first line and the models on the second */
 .model-row {
   display: grid;
   grid-template-columns: minmax(150px, 1.3fr) minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(0, 0.8fr);
@@ -406,7 +407,8 @@ pre.output.error { color: var(--bad); }
   align-items: end;
 }
 .model-row + .model-row { border-top: 1px solid var(--border); padding-top: 12px; }
-.model-role { align-self: center; }
+.model-role { align-self: center; grid-row: span 2; }
+.model-field.new-line { grid-column-start: 2; }
 .model-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .model-field select { width: 100%; }
 
@@ -433,7 +435,8 @@ pre.output.error { color: var(--bad); }
   .filters input { min-width: 0; }
   .settings { padding: 16px; }
   .model-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .model-role { grid-column: 1 / -1; }
+  .model-role { grid-column: 1 / -1; grid-row: auto; }
+  .model-field.new-line { grid-column-start: auto; }
   .save-status { flex-basis: 100%; }
   .savebar .button { flex: 1; }
 }
