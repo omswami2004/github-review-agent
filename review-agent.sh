@@ -114,7 +114,7 @@ AGY_TIMEOUT="${AGY_TIMEOUT:-15m0s}"
 AGY_FLAGS="${AGY_FLAGS:---dangerously-skip-permissions}"
 # Models tried in order (see `agy models`); the next one is used if a model fails,
 # e.g. because its quota is exhausted.
-AGY_MODELS="${AGY_MODELS:-gemini-3.8-flash-high claude-sonnet-5-5-high gemini-3.1-pro-high}"
+AGY_MODELS="${AGY_MODELS:-gemini-3.8-flash-high claude-opus-4-6-thinking claude-sonnet-4-6}"
 
 # Monitored repositories list
 if [ -n "${WATCH_REPOS:-}" ]; then
@@ -227,7 +227,7 @@ resolve_model() {
     opus) echo "claude-opus-5-5" ;;
     sonnet) echo "claude-sonnet-5-5" ;;
     haiku) echo "claude-haiku-5-5" ;;
-    fable) echo "claude-fable-5-1" ;;
+    fable) echo "claude-fable-5-2" ;;
     *) echo "$1" ;;
   esac
 }

@@ -6,7 +6,7 @@
 const API = "api/settings";
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // Offered in the model lists, along with any other model the settings already use
-const KNOWN_MODELS = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+const KNOWN_MODELS = ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 // The methods a reply can be written with. agy can't be limited to reading files, so contributors
 // don't get it.
 const METHODS = [

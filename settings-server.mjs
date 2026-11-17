@@ -48,7 +48,7 @@ async function agentEnv() {
     bot: env.BOT_USER || "",
     owner: env.ADMIN_USER || "",
     backends: (env.AI_BACKENDS || "claude-cli claude-api").split(/\s+/).filter(Boolean),
-    agyModels: (env.AGY_MODELS || "gemini-3.8-flash-high claude-sonnet-5-5-high gemini-3.1-pro-high").split(/\s+/).filter(Boolean),
+    agyModels: (env.AGY_MODELS || "gemini-3.8-flash-high claude-opus-4-6-thinking claude-sonnet-4-6").split(/\s+/).filter(Boolean),
     apiKey: Boolean(env.apiKey),
     accessFile: resolve(AGENT_DIR, env.ACCESS_FILE || join(dataDir, "access.json")),
   };

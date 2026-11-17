@@ -313,7 +313,7 @@ Review with the Claude API instead of the CLI:
 Use the Antigravity CLI with one of its models:
 
 ```text
-@your-bot-username review --method agy --model gemini-3.1-pro-high
+@your-bot-username review --method agy --model claude-opus-4-6-thinking
 ```
 
 Review with the most capable model:
@@ -343,7 +343,7 @@ Keep the default model, but think harder:
 | Option | Values |
 | :--- | :--- |
 | `--method` | `cli` (Claude Code CLI), `api` (Claude API) or `agy` (Antigravity CLI); `claude-cli`, `claude-api` and `antigravity` also work. |
-| `--model` | `opus` (`claude-opus-5-5`), `sonnet` (`claude-sonnet-5-5`), `haiku` (`claude-haiku-5-5`), `fable` (`claude-fable-5-1`), or any full model ID. `--model=<name>` also works. |
+| `--model` | `opus` (`claude-opus-5-5`), `sonnet` (`claude-sonnet-5-5`), `haiku` (`claude-haiku-5-5`), `fable` (`claude-fable-5-2`), or any full model ID. `--model=<name>` also works. |
 | `--effort` | `low`, `medium`, `high`, `xhigh` or `max`. |
 
 - The method and model you name are tried first. If they fail, the configured ones are used as fallbacks, so you still get a reply. An unknown method is ignored.
@@ -380,7 +380,7 @@ Keep the default model, but think harder:
 | `DASHBOARD_DIR` | No | `./data/dashboard` | Where the activity records and the dashboard viewer are written, for a web server to serve. |
 | `RUNS_KEEP_DAYS` | No | `7` | Days to keep activity records. |
 | `AGY_TIMEOUT` | No | `15m0s` | Maximum execution timeout for Antigravity CLI reasoning. |
-| `AGY_MODELS` | No | `gemini-3.8-flash-high claude-sonnet-5-5-high gemini-3.1-pro-high` | Space-separated models tried in order (see `agy models`). If one fails, e.g. its quota is exhausted, the next is used. |
+| `AGY_MODELS` | No | `gemini-3.8-flash-high claude-opus-4-6-thinking claude-sonnet-4-6` | Space-separated models tried in order (see `agy models`). If one fails, e.g. its quota is exhausted, the next is used. |
 | `AGY_FLAGS` | No | `--dangerously-skip-permissions` | Additional CLI flags passed to `agy`. |
 | `OWNER_NAME` | No | `$ADMIN_USER` | Name in the closing "Reviewed by *model* on behalf of *OWNER_NAME*" line of every response; links to `github.com/$ADMIN_USER`. |
 | `BOT_FOOTER` | No | None | Extra text appended to responses, before the "Reviewed by" line. |

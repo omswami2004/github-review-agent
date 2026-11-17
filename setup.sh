@@ -209,7 +209,7 @@ list_models() {
           -H @<(printf 'x-api-key: %s\n' "$ANTHROPIC_API_KEY"))" = 200 ]; then
         jq -r '.data[] | "\(.id)\t\(.display_name)"' "$TMP_DIR/models.json"
       else
-        printf '%s\t%s\n' claude-fable-5-1 "Claude Fable 5.1" claude-opus-5-5 "Claude Opus 5.5" \
+        printf '%s\t%s\n' claude-fable-5-2 "Claude Fable 5.2" claude-opus-5-5 "Claude Opus 5.5" \
           claude-sonnet-5-5 "Claude Sonnet 5.5" claude-haiku-5-5 "Claude Haiku 5.5"
       fi
       ;;
