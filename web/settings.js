@@ -5,8 +5,15 @@
 
 const API = "api/settings";
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-// Offered in the model lists, along with any other model the settings already use
-const KNOWN_MODELS = ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+// The short names "--model" takes in a comment, as in resolve_model in review-agent.sh. Their models
+// are offered in the model lists, along with any other model the settings already use.
+const MODEL_ALIASES = {
+  fable: "claude-fable-5-2",
+  opus: "claude-opus-5-5",
+  sonnet: "claude-sonnet-5-5",
+  haiku: "claude-haiku-5-5",
+};
+const KNOWN_MODELS = Object.values(MODEL_ALIASES);
 // The methods a reply can be written with. agy can't be limited to reading files, so contributors
 // don't get it.
 const METHODS = [
@@ -326,6 +333,41 @@ function modelsCard() {
       : null);
 }
 
+// Example comments that choose the method, model and effort for one reply, filled in with the
+// admins' current settings, and the values each option takes
+function commentOptionsCard() {
+  const bot = `@${state.info.bot || "bot"}`;
+  const admin = state.settings.models.admin;
+  const model = modelName(admin.models[0] || KNOWN_MODELS[1]);
+  const fable = modelName(MODEL_ALIASES.fable);
+  const noKey = state.info.api_key === false ? " No API key is set, so this fails until one is added." : "";
+  // Each option stays on one line with its value, so "--effort low" never breaks after a hyphen
+  const example = (comment, explanation) => el("li", { class: "example" },
+    el("code", { class: "example-comment" }, `${bot} ${comment}`.split(/(--[a-z]+ \S+)/)
+      .map((part) => part.startsWith("--") ? el("span", { class: "option", text: part }) : part)),
+    el("span", { class: "muted small" }, explanation));
+  const list = (items) => items.flatMap(([value, label], i) =>
+    [i === 0 ? "" : i === items.length - 1 ? " or " : ", ", code(value), label ? ` (${label})` : ""]);
+  return card("Choosing for one reply",
+    ["Admins can add ", code("--model"), ", ", code("--effort"), " and ", code("--method"), " to a mention to choose for that reply only. " +
+      "What they name is tried first, with the settings above as the fallback. The options are removed before the model reads the comment, and are ignored in a contributor's."],
+    el("ul", { class: "examples" },
+      example("review this PR --model fable", `${fable}, the most capable model, at the admins' effort (${admin.effort})`),
+      example("review this PR --model fable --effort max", `${fable} at max effort: the most thorough, and the slowest`),
+      example("what does parse_config() return on an empty file? --model haiku --effort low",
+        `${modelName(MODEL_ALIASES.haiku)} at low effort, for a quick, cheaper answer`),
+      example("review this PR --method api",
+        `The Claude API instead of the CLI, with the admins' model (${model}). It answers from the diff and the discussion, and can't run commands or push.${noKey}`),
+      example("review this PR --method api --model fable --effort high", `The Claude API with ${fable} at high effort`)),
+    el("dl", { class: "options-ref" },
+      el("dt", {}, code("--model")),
+      el("dd", {}, list(Object.entries(MODEL_ALIASES).map(([alias, id]) => [alias, modelName(id)])), ", or a full model ID such as ", code(MODEL_ALIASES.sonnet)),
+      el("dt", {}, code("--effort")),
+      el("dd", {}, list(EFFORTS.map((effort) => [effort]))),
+      el("dt", {}, code("--method")),
+      el("dd", {}, list([["cli", "Claude Code CLI"], ["api", "Claude API"], ["agy", "Antigravity CLI"]]))));
+}
+
 function intro() {
   const bot = state.info.bot ? `@${state.info.bot}` : "the bot";
   return el("div", { class: "settings-intro" },
@@ -346,7 +388,7 @@ function render(focusKey) {
   const caret = !focusKey && active?.type === "text" ? [active.selectionStart, active.selectionEnd] : null;
   const scroll = main.scrollTop;
 
-  main.replaceChildren(intro(), adminsCard(), contributorsCard(), modelsCard());
+  main.replaceChildren(intro(), adminsCard(), contributorsCard(), modelsCard(), commentOptionsCard());
   main.scrollTop = scroll;
   const field = key ? main.querySelector(`[data-focus="${CSS.escape(key)}"]`) : null;
   if (field) {

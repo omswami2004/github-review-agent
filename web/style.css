@@ -396,6 +396,31 @@ pre.output.error { color: var(--bad); }
   border-top: 1px solid var(--border);
 }
 .limit input { width: 90px; }
+
+/* Example comments, which wrap on narrow screens */
+.examples { list-style: none; margin: 0 0 16px; padding: 0; }
+.example { padding: 8px 0; border-top: 1px solid var(--border); }
+.example:first-child { border-top: 0; padding-top: 0; }
+.card .example-comment {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+}
+.example-comment .option { white-space: nowrap; }
+.options-ref {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 12px;
+  margin: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.options-ref dt, .options-ref dd { margin: 0; }
+.options-ref dd { color: var(--muted); }
 .limit + p { margin: 4px 0 0; }
 
 .models { display: grid; gap: 12px; }
