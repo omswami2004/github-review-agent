@@ -271,7 +271,9 @@ server {
     root /srv/review-agent;
     auth_basic "Review agent";
     auth_basic_user_file /etc/nginx/review-agent.htpasswd;
-    location /runs/ { expires -1; }
+    # Browsers check for a new copy every time: records change while a reply is written,
+    # and the pages when the agent is updated
+    location / { expires -1; }
     location /api/ {
         proxy_pass http://127.0.0.1:9098;
         proxy_set_header X-Forwarded-Host $host;
