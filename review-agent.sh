@@ -203,6 +203,17 @@ contributor_reviews() {
   awk -v u="${1,,}" -v since="$(($(date +%s) - 86400))" '$1 >= since && $2 == u { n++ } END { print n + 0 }' "$CONTRIBUTOR_LOG"
 }
 
+# The closing "Reviewed by <model> on behalf of …" (or "Automated reply on behalf of …") line and
+# the rule above it, any number of times at the very end of a text. The agent adds this footer to
+# every reply itself, so it is taken out of the bot's earlier replies in the prompt (discussion)
+# and out of the model's reply (strip_footer); otherwise a model that copies it posts it twice.
+FOOTER_RE='(\s*\n(?:-{3,}[ \t]*\n)?\*?(?:Reviewed by [^\n]* on behalf of|Automated reply on behalf of)[^\n]*)+\s*\z'
+
+# strip_footer: print stdin without a closing footer (FOOTER_RE)
+strip_footer() {
+  FOOTER_RE="$FOOTER_RE" perl -0777 -pe 's/$ENV{FOOTER_RE}//'
+}
+
 # post_notice REPO NUM TEXT: post a short reply that needs no model, such as why the bot won't do
 # what was asked
 post_notice() {
@@ -257,12 +268,14 @@ discussion() {
     gh api --paginate "repos/$repo/pulls/$num/commits?per_page=100" -q '.[]' > "$dir/commits" 2>/dev/null
   fi
   touch "$dir/reviews" "$dir/inline" "$dir/commits"
-  jq -n -r --arg bot "${BOT_USER,,}" --arg skip "$skip" --argjson max "$DISCUSSION_MAX_CHARS" \
+  jq -n -r --arg bot "${BOT_USER,,}" --arg skip "$skip" --argjson max "$DISCUSSION_MAX_CHARS" --arg footer "$FOOTER_RE" \
     --slurpfile subject "$dir/subject" --slurpfile comments "$dir/comments" \
     --slurpfile reviews "$dir/reviews" --slurpfile inline "$dir/inline" --slurpfile commits "$dir/commits" '
     def who($u): ($u // "ghost") as $u | "@\($u)" + (if ($u | ascii_downcase) == $bot then " (you)" else "" end);
-    # Bot accounts (CI, coverage, deploy previews) get less room than people
-    def body($user): (.body // "" | gsub("\r"; "")) as $b |
+    # Bot accounts (CI, coverage, deploy previews) get less room than people. The footer of our
+    # own replies is left out, so the model does not copy it into its reply.
+    def body($user): (.body // "" | gsub("\r"; "") |
+        if ($user.login // "" | ascii_downcase) == $bot then sub($footer; "") else . end) as $b |
       (if $user.type == "Bot" then 1500 else 6000 end) as $n |
       if ($b | length) > $n then $b[:$n] + "\n[... shortened]" else $b end;
     ($inline | map({key: (.id | tostring), value: .user.login}) | from_entries) as $authors |
@@ -996,6 +1009,8 @@ PROMPT_EOF
           -e '/^\.\.\.$/d')
         ai_reply=$(echo "$ai_reply" | awk 'NF{p=1} p')
       fi
+      # The footer is added below; drop one the model wrote itself
+      ai_reply=$(printf '%s\n' "$ai_reply" | strip_footer)
 
       if [ $ai_exit -eq 0 ] && [ -n "$ai_reply" ]; then
         # A short reply that reads like a quota error is a failure, not a review
