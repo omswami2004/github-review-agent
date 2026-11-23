@@ -1,9 +1,12 @@
 // Settings page: who may mention the bot, and the method and models they get. Loads and saves the access
 // settings through the agent's settings API (settings-server.mjs) at api/settings. The agent reads
-// them again for every mention, so a saved change applies from the next one.
+// them again for every mention, so a saved change applies from the next one. The Claude API key is
+// saved on its own, at api/api-key, and is never sent back: the page only learns its last four
+// characters.
 "use strict";
 
 const API = "api/settings";
+const KEY_API = "api/api-key";
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // The short names "--model" takes in a comment, as in resolve_model in review-agent.sh. Their models
 // are offered in the model lists, along with any other model the settings already use.
@@ -38,7 +41,32 @@ const state = {
   errors: {},
   saving: false,
   status: null,
+  // The API key card: whether a key is being saved or removed, and how that went
+  keySaving: false,
+  keyStatus: null,
 };
+
+// The key field is made once and moved into each re-render, so what is typed stays in the field
+// and nowhere else
+const keyInput = el("input", {
+  type: "password",
+  class: "key-input",
+  placeholder: "sk-ant-api03-...",
+  "aria-label": "Claude API key",
+  "data-focus": "api-key",
+  autocomplete: "off",
+  autocapitalize: "off",
+  spellcheck: "false",
+  "data-1p-ignore": "",
+  "data-lpignore": "true",
+  oninput: () => renderKeyButtons(),
+  onkeydown: (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveKey();
+    }
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,6 +93,9 @@ function editable(settings, info = {}) {
     models: { admin: models("admin"), contributor: models("contributor") },
   };
 }
+
+// Whether the agent has a Claude API key, from the settings page or from .env
+const hasApiKey = () => Boolean(state.info.api_key?.source);
 
 function dirty() {
   return state.settings !== null && JSON.stringify(state.settings) !== state.saved;
@@ -324,8 +355,8 @@ function modelsCard() {
     el("div", { class: "models" },
       modelRow("admin", "Admins", [code("--method"), ", ", code("--model"), " and ", code("--effort"), " in a comment override these for one reply."]),
       modelRow("contributor", "Contributors", "Contributors can't choose another method or model, and can't use agy.")),
-    used.includes("claude-api") && state.info.api_key === false
-      ? el("p", { class: "field-warning" }, "No API key is set (", code("ANTHROPIC_API_KEY"), " in .env), so the Claude API method will fail. Run ", code("./setup.sh"), " on the server to add one.")
+    used.includes("claude-api") && !hasApiKey()
+      ? el("p", { class: "field-warning" }, "No API key is set, so the Claude API method will fail. Add one under Claude API key below.")
       : null,
     used.includes("agy")
       ? el("p", { class: "muted small" }, code("agy"), " uses ", code("AGY_MODELS"), " from .env",
@@ -340,7 +371,7 @@ function commentOptionsCard() {
   const admin = state.settings.models.admin;
   const model = modelName(admin.models[0] || KNOWN_MODELS[1]);
   const fable = modelName(MODEL_ALIASES.fable);
-  const noKey = state.info.api_key === false ? " No API key is set, so this fails until one is added." : "";
+  const noKey = hasApiKey() ? "" : " No API key is set, so this fails until one is added.";
   // Each option stays on one line with its value, so "--effort low" never breaks after a hyphen
   const example = (comment, explanation) => el("li", { class: "example" },
     el("code", { class: "example-comment" }, `${bot} ${comment}`.split(/(--[a-z]+ \S+)/)
@@ -368,6 +399,104 @@ function commentOptionsCard() {
       el("dd", {}, list([["cli", "Claude Code CLI"], ["api", "Claude API"], ["agy", "Antigravity CLI"]]))));
 }
 
+// The Claude API key: where the agent gets it from, a field to save a new one, and a button to
+// remove the saved one
+function apiKeyCard() {
+  const key = state.info.api_key || {};
+  const ending = key.hint ? [" It ends in ", code(key.hint), "."] : "";
+  let current;
+  if (key.source === "settings") {
+    const when = key.saved_at ? ` on ${new Date(key.saved_at).toLocaleString()}` : "";
+    current = el("p", { class: "key-current" }, el("strong", { text: "Saved here" }), `${when}${key.saved_by ? ` by ${key.saved_by}` : ""}.`, ending,
+      key.env_key ? [" ", code("ANTHROPIC_API_KEY"), " in .env is also set, and isn't used while this one is saved."] : "");
+  } else if (key.source === "env") {
+    current = el("p", { class: "key-current" }, el("strong", { text: "From .env" }), " (", code("ANTHROPIC_API_KEY"), ").", ending,
+      " A key saved here replaces it.");
+  } else {
+    current = el("p", { class: "field-warning" }, "No key is set, so the Claude API method fails until one is added.");
+  }
+  const status = state.keyStatus;
+  return card("Claude API key",
+    ["For the Claude API method. A new key is checked with Anthropic before it's saved, and then used from the next reply. " +
+      "It's kept on the server in a file only the agent's user can read, and is never sent back to this page, which only shows its last four characters. " +
+      "Create one at ", el("a", { href: "https://platform.claude.com/settings/keys", target: "_blank", rel: "noopener noreferrer", text: "platform.claude.com" }), "."],
+    current,
+    el("div", { class: "add-row" },
+      keyInput,
+      el("button", { type: "button", class: "button primary", id: "key-save", text: key.source === "settings" ? "Replace key" : "Save key", onclick: saveKey })),
+    state.keySaving ? el("p", { class: "muted small key-status", text: state.keySaving === "remove" ? "Removing..." : "Checking the key with Anthropic..." }) : null,
+    !state.keySaving && status?.error ? el("p", { class: "field-error", text: status.error }) : null,
+    !state.keySaving && status?.done ? el("p", { class: "field-ok", text: status.done }) : null,
+    key.source === "settings"
+      ? el("button", { type: "button", class: "link-button danger", id: "key-remove", text: "Remove the saved key", onclick: removeKey })
+      : null);
+}
+
+// Enable the key buttons for what is typed, without re-rendering while the key is typed
+function renderKeyButtons() {
+  const save = $("key-save");
+  const remove = $("key-remove");
+  if (save) save.disabled = Boolean(state.keySaving) || !keyInput.value.trim();
+  if (remove) remove.disabled = Boolean(state.keySaving);
+}
+
+async function keyRequest(method, body) {
+  const response = await fetch(KEY_API, {
+    method,
+    cache: "no-store",
+    headers: body ? { "content-type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    // Not JSON, such as nginx's own error page
+  }
+  if (!response.ok) throw new Error(data.error || `The settings API answered HTTP ${response.status}`);
+  return data;
+}
+
+async function saveKey() {
+  const key = keyInput.value.trim();
+  if (!key || state.keySaving) return;
+  state.keySaving = "save";
+  state.keyStatus = null;
+  render();
+  try {
+    const data = await keyRequest("PUT", { key });
+    state.info.api_key = data.api_key;
+    keyInput.value = "";
+    state.keyStatus = { done: "Saved. Anthropic accepted the key, and the agent uses it from the next reply." };
+  } catch (error) {
+    state.keyStatus = { error: error.message };
+  } finally {
+    state.keySaving = false;
+  }
+  render();
+}
+
+async function removeKey() {
+  if (state.keySaving) return;
+  const fallback = state.info.api_key?.env_key
+    ? "The key in .env (ANTHROPIC_API_KEY) will be used instead."
+    : "No key will be left, so the Claude API method will fail until one is added.";
+  if (!confirm(`Remove the saved Claude API key? ${fallback}`)) return;
+  state.keySaving = "remove";
+  state.keyStatus = null;
+  render();
+  try {
+    const data = await keyRequest("DELETE");
+    state.info.api_key = data.api_key;
+    state.keyStatus = { done: "Removed." };
+  } catch (error) {
+    state.keyStatus = { error: `Not removed: ${error.message}` };
+  } finally {
+    state.keySaving = false;
+  }
+  render();
+}
+
 function intro() {
   const bot = state.info.bot ? `@${state.info.bot}` : "the bot";
   return el("div", { class: "settings-intro" },
@@ -385,10 +514,10 @@ function render(focusKey) {
   const main = $("settings");
   const active = document.activeElement;
   const key = focusKey || active?.dataset?.focus;
-  const caret = !focusKey && active?.type === "text" ? [active.selectionStart, active.selectionEnd] : null;
+  const caret = !focusKey && (active?.type === "text" || active?.type === "password") ? [active.selectionStart, active.selectionEnd] : null;
   const scroll = main.scrollTop;
 
-  main.replaceChildren(intro(), adminsCard(), contributorsCard(), modelsCard(), commentOptionsCard());
+  main.replaceChildren(intro(), adminsCard(), contributorsCard(), modelsCard(), apiKeyCard(), commentOptionsCard());
   main.scrollTop = scroll;
   const field = key ? main.querySelector(`[data-focus="${CSS.escape(key)}"]`) : null;
   if (field) {
@@ -396,6 +525,7 @@ function render(focusKey) {
     if (caret) field.setSelectionRange(...caret);
   }
   renderSaveBar();
+  renderKeyButtons();
 }
 
 function problems() {

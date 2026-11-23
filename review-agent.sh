@@ -64,6 +64,13 @@ LOG_FILE="${LOG_FILE:-$SCRIPT_DIR/review.log}"
 # settings page (served by settings-server.mjs) and read again for every mention, so a change
 # applies from the next one. ADMIN_USER is always an admin, whatever the file says.
 ACCESS_FILE="${ACCESS_FILE:-$DATA_DIR/access.json}"
+# The Claude API key saved on the dashboard's settings page (or by setup.sh), mode 600 in a mode 700
+# folder. It is read for every request, so a new key applies from the next reply, and it wins over
+# ANTHROPIC_API_KEY in .env.
+API_KEY_FILE="${API_KEY_FILE:-$DATA_DIR/secrets/anthropic-api-key.json}"
+# Only run_claude_api uses the key, so it isn't passed on to anything the agent runs (git, gh, the
+# CLIs and the commands they run)
+export -n ANTHROPIC_API_KEY
 # One line per review a contributor was queued for, to enforce the daily limit
 CONTRIBUTOR_LOG="${CONTRIBUTOR_LOG:-$DATA_DIR/contributor_reviews.log}"
 POLL_INTERVAL="${POLL_INTERVAL:-15}"
@@ -106,7 +113,8 @@ CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-900}" # seconds, for both Claude backends
 # direnv (which can load a Nix environment) and sudo (so nothing is installed system-wide)
 CLAUDE_DENIED_TOOLS="Bash(nix:*) Bash(nix-shell:*) Bash(nix-build:*) Bash(nix-env:*) Bash(nix-store:*) Bash(nix-channel:*) Bash(nix-instantiate:*) Bash(nix-collect-garbage:*) Bash(direnv:*) Bash(sudo:*)"
 
-# Claude API: uses ANTHROPIC_API_KEY, and answers from the prompt (comment and PR diff) only
+# Claude API: uses the API key from the settings page (or ANTHROPIC_API_KEY), and answers from the
+# prompt (comment and PR diff) only
 CLAUDE_API_MODELS="${CLAUDE_API_MODELS:-$CLAUDE_MODELS}"
 CLAUDE_API_MAX_TOKENS="${CLAUDE_API_MAX_TOKENS:-64000}"
 
@@ -511,11 +519,20 @@ ci_summary() {
     ) | join(", ")' 2>/dev/null | cut -c1-400
 }
 
+# anthropic_api_key: print the Claude API key, the one saved in API_KEY_FILE or else
+# ANTHROPIC_API_KEY from .env
+anthropic_api_key() {
+  local key=""
+  [ -r "$API_KEY_FILE" ] && key=$(jq -r '.key // empty' "$API_KEY_FILE" 2>/dev/null)
+  printf '%s' "${key:-${ANTHROPIC_API_KEY:-}}"
+}
+
 # An optional third argument names a file to save the response headers in (used by setup.sh).
 run_claude_api() {
-  local model="$1" prompt_file="$2" headers_file="${3:-/dev/null}"
-  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-    echo "Claude API: ANTHROPIC_API_KEY is not set" >&2
+  local model="$1" prompt_file="$2" headers_file="${3:-/dev/null}" api_key
+  api_key=$(anthropic_api_key)
+  if [ -z "$api_key" ]; then
+    echo "Claude API: no API key. Add one on the dashboard's Settings page, or with ./setup.sh" >&2
     return 1
   fi
 
@@ -541,7 +558,7 @@ run_claude_api() {
       -H "content-type: application/json" \
       -H "anthropic-version: 2026-10-21" \
       -H "anthropic-beta: server-side-fallback-2026-07-01" \
-      -H @<(printf 'x-api-key: %s\n' "$ANTHROPIC_API_KEY") \
+      -H @<(printf 'x-api-key: %s\n' "$api_key") \
       --data-binary @-)
 
   # A request rejected up front gets a plain JSON error body, not an event stream

@@ -87,6 +87,8 @@ set -a; source "$AGENT_ENV"; set +a
 
 # Settings to write to .env when you type "done"
 declare -A PENDING=()
+# A new Claude API key, saved to API_KEY_FILE (not .env) when you type "done"
+NEW_API_KEY=""
 
 heading "GitHub"
 is_placeholder() { [ -z "$1" ] || [[ "$1" == *your* ]]; }
@@ -115,6 +117,8 @@ ENV_FILE="$TMP_DIR/empty.env"
 # shellcheck disable=SC1091
 source "$AGENT_DIR/review-agent.sh"
 unset ENV_FILE
+# Where the agent reads the API key; a new key is tested from a temporary copy first
+SAVED_API_KEY_FILE="$API_KEY_FILE"
 
 # The admins' method (backends), Claude models and effort are kept in the access settings (the
 # dashboard's settings page), so start from those. The ones picked below are saved there too.
@@ -204,9 +208,11 @@ list_models() {
   case "$1" in
     claude-cli|claude-api)
       # The Models API needs a key; without one, list the current Claude models
-      if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "$(curl -sS --max-time 20 -o "$TMP_DIR/models.json" -w '%{http_code}' \
+      local key
+      key=$(anthropic_api_key)
+      if [ -n "$key" ] && [ "$(curl -sS --max-time 20 -o "$TMP_DIR/models.json" -w '%{http_code}' \
           "https://api.anthropic.com/v1/models?limit=100" -H "anthropic-version: 2026-10-21" \
-          -H @<(printf 'x-api-key: %s\n' "$ANTHROPIC_API_KEY"))" = 200 ]; then
+          -H @<(printf 'x-api-key: %s\n' "$key"))" = 200 ]; then
         jq -r '.data[] | "\(.id)\t\(.display_name)"' "$TMP_DIR/models.json"
       else
         printf '%s\t%s\n' claude-fable-5-2 "Claude Fable 5.2" claude-opus-5-5 "Claude Opus 5.5" \
@@ -293,24 +299,46 @@ show_month_spend() {
   fi
 }
 
+# save_api_key KEY FILE: save the Claude API key as the settings page does: JSON, mode 600, in a
+# folder created with mode 700, renamed into place so the agent never reads half a file. The key
+# goes to jq in its environment, not its arguments, so it doesn't show in the process list.
+save_api_key() {
+  local dir tmp
+  dir=$(dirname "$2")
+  (umask 077 && mkdir -p "$dir") || return 1
+  tmp=$(umask 077 && mktemp "$dir/.api-key.XXXXXX") || return 1
+  if API_KEY="$1" BY="setup.sh ($(id -un))" jq -n '{key: env.API_KEY, saved_at: (now | todate), saved_by: env.BY}' > "$tmp" &&
+    mv "$tmp" "$2"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 configure_claude_api() {
   heading "Claude API"
-  local new_key admin_key prompt="Anthropic API key (input hidden)"
-  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    prompt="Anthropic API key, or Enter to keep the current one (ending ${ANTHROPIC_API_KEY: -4})"
+  local new_key admin_key current prompt="Anthropic API key (input hidden)"
+  current=$(anthropic_api_key)
+  if [ -n "$current" ]; then
+    prompt="Anthropic API key, or Enter to keep the current one (ending ${current: -4})"
   fi
   ask_secret new_key "$prompt"
   if [ -n "$new_key" ]; then
-    if [[ ! "$new_key" =~ ^sk-ant-[A-Za-z0-9_-]+$ ]]; then
+    if [[ "$new_key" == sk-ant-admin* ]]; then
+      fail "That's an Admin API key, which can't write replies. Use a regular API key (sk-ant-api...)"
+      return 1
+    elif [[ ! "$new_key" =~ ^sk-ant-[A-Za-z0-9_-]+$ ]]; then
       fail "That doesn't look like an Anthropic API key (they start with sk-ant-)"
       return 1
     fi
-    ANTHROPIC_API_KEY="$new_key"
-  elif [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-    fail "The Claude API needs a key. Create one at https://platform.claude.com/settings/keys"
+    # Tested from a copy in the temporary folder, and saved where the agent reads it on "done"
+    save_api_key "$new_key" "$TMP_DIR/api-key.json" || { fail "Couldn't write the key to $TMP_DIR"; return 1; }
+    API_KEY_FILE="$TMP_DIR/api-key.json"
+    NEW_API_KEY="$new_key"
+  elif [ -z "$current" ]; then
+    fail "The Claude API needs a key. Create one at https://platform.claude.com/settings/keys, or add it on the dashboard's Settings page"
     return 1
   fi
-  PENDING[ANTHROPIC_API_KEY]="$ANTHROPIC_API_KEY"
 
   pick_models CLAUDE_API_MODELS claude-api
   PENDING[CLAUDE_API_MODELS]="$CLAUDE_API_MODELS"
@@ -368,6 +396,8 @@ for key in "${!PENDING[@]}"; do
     *) printf '  %s%s%s = "%s"\n' "$DIM" "$key" "$RST" "${PENDING[$key]}" ;;
   esac
 done
+[ -n "$NEW_API_KEY" ] &&
+  printf '  %sClaude API key%s = (hidden, ending %s), saved in %s\n' "$DIM" "$RST" "${NEW_API_KEY: -4}" "$SAVED_API_KEY_FILE"
 
 while :; do
   ask answer "Type done to save and redeploy, or q to quit without saving" done
@@ -389,9 +419,25 @@ set_env() {
   ' "$AGENT_ENV" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$AGENT_ENV"
 }
 
+# unset_env KEY: remove KEY's line from .env
+unset_env() {
+  local tmp
+  tmp=$(mktemp "$AGENT_ENV.XXXXXX")
+  KEY="$1" awk 'index($0, ENVIRON["KEY"] "=") != 1' "$AGENT_ENV" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$AGENT_ENV"
+}
+
 heading "Deploying"
 cp -p "$AGENT_ENV" "$AGENT_ENV.bak"
 for key in "${!PENDING[@]}"; do set_env "$key" "${PENDING[$key]}"; done
+# The new key replaces the one in .env, so only one copy is kept
+if [ -n "$NEW_API_KEY" ]; then
+  if save_api_key "$NEW_API_KEY" "$SAVED_API_KEY_FILE"; then
+    ok "Saved the Claude API key in $SAVED_API_KEY_FILE (mode 600)"
+    grep -q '^ANTHROPIC_API_KEY=' "$AGENT_ENV" && unset_env ANTHROPIC_API_KEY && note "Removed the old ANTHROPIC_API_KEY from .env"
+  else
+    fail "Couldn't save the Claude API key in $SAVED_API_KEY_FILE"
+  fi
+fi
 chmod 600 "$AGENT_ENV"
 ok "Saved .env (previous version in .env.bak)"
 

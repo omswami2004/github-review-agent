@@ -61,7 +61,7 @@ Ensure the following dependencies are installed on the host running the agent:
      curl -fsSL https://claude.ai/install.sh | bash
      claude auth login
      ```
-   - **A Claude API key** (`claude-api` backend), from https://platform.claude.com/settings/keys
+   - **A Claude API key** (`claude-api` backend), from https://platform.claude.com/settings/keys. Add it on the dashboard's Settings page, or with `./setup.sh`.
    - **Antigravity CLI** (`agy` backend):
      ```bash
      agy --version
@@ -126,7 +126,7 @@ It walks through these steps:
 3. Asks which backend to use: Claude Code CLI, Claude API, either one with the other as a fallback, or Antigravity CLI.
 4. For each backend:
    - **Claude Code CLI**: shows which account and plan `claude` is logged in with.
-   - **Claude API**: asks for the API key (hidden). Press Enter to keep the saved one.
+   - **Claude API**: asks for the API key (hidden). Press Enter to keep the saved one. A new key is saved where the Settings page saves it (see [The Claude API key](#the-claude-api-key)), not in `.env`, and replaces any `ANTHROPIC_API_KEY` there.
    - Lists the available models, so you can pick the default and its fallbacks.
    - Sends each model a short test prompt and shows whether it worked, with the reason if it didn't.
    - **Claude API**: also shows your rate-limit headroom. Give it an Admin API key (`sk-ant-admin...`, not saved) and it also shows this month's spend. The API doesn't report the remaining credit balance; see https://platform.claude.com/settings/billing for that.
@@ -218,10 +218,10 @@ People are added by GitHub username, with or without the `@`, and several at onc
 | Method | Uses | Can |
 | :--- | :--- | :--- |
 | Claude Code CLI (`claude-cli`) | This machine's `claude` login | Read the checkout and, for admins, run commands, `gh` and open PRs |
-| Claude API (`claude-api`) | `ANTHROPIC_API_KEY` in `.env` | Answer from the prompt only: the comment, the diff, the CI summary and the earlier discussion |
+| Claude API (`claude-api`) | The API key saved on the Settings page (or `ANTHROPIC_API_KEY` in `.env`) | Answer from the prompt only: the comment, the diff, the CI summary and the earlier discussion |
 | Antigravity CLI (`agy`) | `agy`'s own login, and `AGY_MODELS` from `.env` | Like the Claude Code CLI; admins only |
 
-The page warns when a group uses the Claude API and no key is set; add one with `./setup.sh`. The default model, a fallback model and the effort apply to the Claude methods. Settings saved before methods could be chosen have none, and then `AI_BACKENDS` from `.env` is used. `./setup.sh` saves the backends you pick there as the admins' method.
+The page warns when a group uses the Claude API and no key is set; add one on the same page. The default model, a fallback model and the effort apply to the Claude methods. Settings saved before methods could be chosen have none, and then `AI_BACKENDS` from `.env` is used. `./setup.sh` saves the backends you pick there as the admins' method.
 
 **What a contributor gets.** On a pull request, the bot writes a review in the usual format, using the comment only as a hint about what to focus on. If the comment asks for something else, the bot doesn't do it, and says that it only reviews pull requests for contributors. On an issue, it replies that it only reviews pull requests. Past the daily limit, it replies that they should ask again later. These replies don't use a model.
 
@@ -231,7 +231,7 @@ The page warns when a group uses the Claude API and no key is set; add one with 
 - It gets no GitHub token, so it can't post, push or open anything. The agent posts the review.
 - `agy` can't be restricted this way, so it can't be chosen for contributors, and it never answers one. `claude-api` has no tools at all.
 
-**Where the settings live.** `data/access.json` (`ACCESS_FILE`). The agent writes it on its first start, with `ADMIN_USER` as the only admin, the admins' models from `CLAUDE_MODELS` and `CLAUDE_EFFORT`, and no repo open to contributors. After that, the file's models are the ones used, for both Claude backends; `./setup.sh` writes the admin models you pick there too. The page saves the file through a small settings API, `settings-server.mjs` (Node, no dependencies), which checks every change before it writes it. It runs as `review-agent-settings.service` on `127.0.0.1:9098`, and `./setup.sh` installs and restarts it along with the agent. To serve it on the dashboard, add this to the dashboard's nginx `server` block, inside the password-protected part (see [Activity Dashboard](#activity-dashboard)):
+**Where the settings live.** `data/access.json` (`ACCESS_FILE`). The agent writes it on its first start, with `ADMIN_USER` as the only admin, the admins' models from `CLAUDE_MODELS` and `CLAUDE_EFFORT`, and no repo open to contributors. After that, the file's models are the ones used, for both Claude backends; `./setup.sh` writes the admin models you pick there too. The page saves the file through a small settings API, `settings-server.mjs` (Node, no dependencies), which checks every change before it writes it. The same API saves the Claude API key (`PUT` and `DELETE /api/api-key`). It runs as `review-agent-settings.service` on `127.0.0.1:9098`, and `./setup.sh` installs and restarts it along with the agent. To serve it on the dashboard, add this to the dashboard's nginx `server` block, inside the password-protected part (see [Activity Dashboard](#activity-dashboard)):
 
 ```nginx
 location /api/ {
@@ -243,6 +243,19 @@ location /api/ {
 ```
 
 The API only accepts changes sent from the dashboard page itself, and records which dashboard user saved them.
+
+### The Claude API key
+
+The Settings page has a **Claude API key** card for the key the Claude API method uses. Paste a key and save it:
+
+- The settings API first asks Anthropic whether the key works, with a request that costs nothing (listing the models). A key Anthropic rejects isn't saved, and the key already saved stays. Admin keys (`sk-ant-admin...`) and Claude Code login tokens are refused, since they can't write replies.
+- It's saved in `data/secrets/anthropic-api-key.json` (`API_KEY_FILE`), with when and by whom. The folder is created with mode `700` and the file with mode `600`, and each save writes a new file and renames it into place. `data/` is in `.gitignore`.
+- The key is never sent back to the browser. The page only shows where the key comes from, its last four characters, and when and by whom it was saved. The settings API doesn't log it, and activity records scrub anything that looks like a key.
+- The agent reads the file for every Claude API request, so a new key applies from the next reply, with no restart.
+- A saved key wins over `ANTHROPIC_API_KEY` in `.env`, which is used only when none is saved. **Remove the saved key** deletes the file.
+- Only `run_claude_api` uses the key. The agent stops exporting `ANTHROPIC_API_KEY`, so nothing it runs gets it in its environment: not `git` or `gh`, not the Claude Code CLI or `agy`, and not the commands they run in a PR's checkout.
+
+`./setup.sh` saves a key you give it the same way. To check the saved key from the server: `jq -r '.key[-4:], .saved_at, .saved_by' data/secrets/anthropic-api-key.json`.
 
 ---
 
@@ -373,7 +386,8 @@ Keep the default model, but think harder:
 | `CLAUDE_MODELS` | No | `claude-opus-5-5 claude-sonnet-5-5` | Models for the Claude Code CLI. The first is the default; the rest are fallbacks. The access settings' models replace it once they exist. |
 | `CLAUDE_API_MODELS` | No | `$CLAUDE_MODELS` | Models for the Claude API, in the same form, also replaced by the access settings. |
 | `CLAUDE_EFFORT` | No | `xhigh` | Effort for both Claude backends: `low`, `medium`, `high`, `xhigh` or `max`. Used for the admins' first access settings. |
-| `ANTHROPIC_API_KEY` | For `claude-api` | — | Claude API key. The CLI backend never uses it; it uses its own `claude` login. |
+| `ANTHROPIC_API_KEY` | No | — | Claude API key, used only when none is saved on the Settings page. The CLI backend never uses it; it uses its own `claude` login. |
+| `API_KEY_FILE` | No | `./data/secrets/anthropic-api-key.json` | Where the Settings page and `./setup.sh` save the Claude API key (mode `600`). |
 | `CLAUDE_TIMEOUT` | No | `900` | Timeout in seconds for one Claude request. |
 | `CLAUDE_FLAGS` | No | `--dangerously-skip-permissions --no-session-persistence` | Extra flags passed to `claude -p`. |
 | `CLAUDE_API_MAX_TOKENS` | No | `64000` | Output token cap for the Claude API, thinking included. |
@@ -462,6 +476,8 @@ For production deployment with automatic reboot recovery:
    - For classic tokens, only grant `repo` and `notifications` scopes. Never grant `admin:org`, `delete_repo`, or `admin:public_key`.
 2. **File Permissions**:
    - Always run `chmod 600 .env` to prevent other unprivileged users or services on the host from reading secrets.
+   - The Claude API key saved on the Settings page is in `data/secrets/` (mode `700`, the file `600`), and is never shown again on the page (see [The Claude API key](#the-claude-api-key)). Anyone with the dashboard login can replace or remove it, but not read it.
+   - Admin replies from `claude-cli` and `agy` run as the agent's user, so like `.env`, the key is readable by them if a comment asks for it. Contributor reviews can't read it: their file reads can't leave the PR's checkout.
 3. **What the CLI Backends Can Do**:
    - For admins, `claude-cli` and `agy` run with `--dangerously-skip-permissions` as the service's user, so the agent can do anything that user can, including the SSH access that user has to other machines. Text in the thread, the PR and the code reaches the model, so only make people admins you trust with that, and run the agent as a user with only the access it needs.
    - Contributor reviews run restricted: read-only file tools confined to the PR's checkout, and no GitHub token (see [Who Can Ask the Bot](#who-can-ask-the-bot)).

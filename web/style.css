@@ -311,7 +311,7 @@ pre.output.error { color: var(--bad); }
 .card-description { margin: 0 0 12px; }
 .card code { white-space: nowrap; background: var(--code-bg); border-radius: 4px; padding: 0 4px; }
 
-.settings input[type="text"], .settings input[type="number"], .settings select {
+.settings input[type="text"], .settings input[type="password"], .settings input[type="number"], .settings select {
   font: inherit;
   color: inherit;
   background: var(--bg);
@@ -366,6 +366,7 @@ pre.output.error { color: var(--bad); }
 .add-row { display: flex; gap: 8px; }
 .add-row input { flex: 1; min-width: 0; }
 .field-error { color: var(--bad); margin: 6px 0 0; font-size: 13px; }
+.field-ok { color: var(--ok); margin: 6px 0 0; font-size: 13px; }
 .field-warning {
   color: var(--run);
   background: var(--run-bg);
@@ -385,6 +386,11 @@ pre.output.error { color: var(--bad); }
 .choice { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 .link-button.danger { color: var(--bad); }
 .empty-note { margin: 0 0 12px; }
+.key-current { margin: 0 0 10px; }
+.key-current + .add-row, .field-warning + .add-row { margin-top: 10px; }
+.settings input.key-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.key-status { margin: 6px 0 0; }
+#key-remove { margin-top: 6px; }
 
 .limit {
   display: flex;
